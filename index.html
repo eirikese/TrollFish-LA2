@@ -306,10 +306,10 @@
        The area is biased toward the left (video) side so it stays clickable even when the
        divider is pushed against the right edge, where #layout's overflow:hidden would clip
        any right-side overflow. */
-    #divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -16px; right: -6px; cursor: col-resize; }
+    #divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -42px; right: -7px; cursor: col-resize; }
     #divider:hover, #divider.dragging { background: var(--accent); }
     #inline-heatmap-divider { position: relative; display: none; width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; z-index: 5; }
-    #inline-heatmap-divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -16px; right: -6px; cursor: col-resize; }
+    #inline-heatmap-divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -42px; right: -7px; cursor: col-resize; }
     #layout.heatmaps-open #inline-heatmap-divider { display: block; }
     #inline-heatmap-divider:hover, #inline-heatmap-divider.dragging { background: var(--accent); }
     #timeline-stat-panel { display: none; flex: 0 0 clamp(220px, 20vw, 320px); min-width: 0; min-height: 0; flex-direction: column; gap: 8px; padding: 8px; background: #101820; border-left: 1px solid rgba(255,255,255,.08); border-right: 1px solid rgba(255,255,255,.08); overflow-y: auto; }

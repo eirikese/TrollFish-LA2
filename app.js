@@ -503,7 +503,16 @@ function normalizePoseInputMaxDim(value) {
 }
 
 function normalizePoseMode(value) {
-  return String(value || '').toLowerCase() === '2d' ? '2d' : '3d';
+  const v = String(value || '').toLowerCase();
+  if (v === 'off') return 'off';
+  if (v === '2d') return '2d';
+  return '3d';
+}
+
+// True when pose mode performs video analysis. When 'off', segments are created and their
+// numeric averages (from CSV/track) are still computed, but no skeleton/pose processing runs.
+function isPoseAnalysisEnabled() {
+  return getPoseMode() !== 'off';
 }
 
 function normalizePoseMinConfidence(value) {
@@ -4620,6 +4629,10 @@ function createManeuverActionState({
 
 async function triggerManeuverPoseExtraction(maneuvers, allowedVideoIds = null) {
   if (!state.projectId) { alert('No project selected'); return; }
+  if (!isPoseAnalysisEnabled()) {
+    alert('Pose mode is turned off. Set Pose mode to 2D or 3D to run video analysis.');
+    return;
+  }
   const jobs = [];
   const seenJobs = new Set();
   let skippedReady = 0;
@@ -6155,7 +6168,7 @@ async function ensureManeuverAnalysisReady(maneuver, { force = false } = {}) {
     if (poseProcessingActive && cached && hasRenderableManeuverGpsOverlay(cached)) {
       return cached;
     }
-    if ((!poseCoverageReady || cachedNeedsControlPredictions) && !poseProcessingActive) {
+    if ((!poseCoverageReady || cachedNeedsControlPredictions) && !poseProcessingActive && isPoseAnalysisEnabled()) {
       try {
         await runSkeletonForVideo(bestVideo.vid.id, {
           startSec: coverageStartSec,
@@ -7006,6 +7019,9 @@ function isSkeletonRangeReady(fileId, startSec, endSec, durationSec = null, tole
 }
 
 function getSegmentProcessingStatus(seg) {
+  if (!isPoseAnalysisEnabled()) {
+    return { key: 'off', label: 'Pose off', detail: 'Pose analysis is turned off — numeric averages only', ready: false };
+  }
   const overlapping = findOverlappingVideos(seg);
   const analyzableOverlapping = findOverlappingVideos(seg, { analyzableOnly: true });
   if (!overlapping.length) {
@@ -12830,6 +12846,7 @@ function dequeueQueuedSegmentRun(fileId, queueIdx) {
 
 async function runSkeletonForVideo(fileId, segmentOpts = {}) {
   if(!state.projectId) { alert('No project selected'); return; }
+  if(!isPoseAnalysisEnabled()) { console.log('[Pose] skipped — pose mode is off'); return; }
   if(!fileId) { alert('No video selected'); return; }
   const fileRec = (state.mapData?.videos || []).find(v => String(v?.id) === String(fileId))
     || await DB.getFile(fileId);
@@ -13139,6 +13156,10 @@ async function runSkeletonForAllVideos() {
  */
 async function reprocessSegment(seg) {
   if (!state.projectId) { alert('No project selected'); return; }
+  if (!isPoseAnalysisEnabled()) {
+    alert('Pose mode is turned off. Set Pose mode to 2D or 3D to run video analysis.');
+    return;
+  }
   if (state.inlineHeatmaps?.visible) setInlineHeatmapsVisible(false);
   if (state.advancedPane?.mode === 'heatmaps') closeStlViewer();
   const overlapping = findOverlappingVideos(seg, { analyzableOnly: true });
@@ -13416,11 +13437,15 @@ async function saveNewSegment() {
 
   // Auto-start processing only when analyzable GoPro videos overlap. CSV/external-only
   // segments are still valid and should not raise a "no analyzable videos" alert.
-  const analyzableOverlap = findOverlappingVideos(seg, { analyzableOnly: true });
-  if (analyzableOverlap.length) {
-    try {
-      reprocessSegment(seg);
-    } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+  // When pose analysis is turned off, skip video processing entirely — the segment still
+  // gets its CSV/track-derived numeric averages via buildReportData.
+  if (isPoseAnalysisEnabled()) {
+    const analyzableOverlap = findOverlappingVideos(seg, { analyzableOnly: true });
+    if (analyzableOverlap.length) {
+      try {
+        reprocessSegment(seg);
+      } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+    }
   }
 
   renderMap();
@@ -13506,7 +13531,7 @@ function renderSegmentPanel() {
     delBtn.title = 'Delete segment';
     delBtn.innerHTML = '<svg class="icon-svg" style="width:10px;height:10px"><use href="#ico-x"/></svg>';
     delBtn.onclick = (e) => { e.stopPropagation(); deleteSegment(seg.id); };
-    row.append(nameEl, rangeEl, procBtn, delBtn);
+    row.append(nameEl, rangeEl, ...(isPoseAnalysisEnabled() ? [procBtn] : []), delBtn);
     list.appendChild(row);
   }
 }
@@ -13666,10 +13691,11 @@ function renderAnalysisTab() {
     renameBtn.textContent = 'Rename';
     renameBtn.onclick = () => openSegmentRenameModal(s.id);
 
+    const poseOff = !isPoseAnalysisEnabled();
     const procBtn = document.createElement('button');
     procBtn.className = 'btn sm';
     procBtn.textContent = status.key === 'ready' ? 'Reprocess' : 'Process';
-    procBtn.disabled = status.key === 'processing';
+    procBtn.disabled = status.key === 'processing' || poseOff;
     procBtn.onclick = () => reprocessSegment(s);
 
     const delBtn = document.createElement('button');
@@ -13677,7 +13703,7 @@ function renderAnalysisTab() {
     delBtn.textContent = 'Delete';
     delBtn.onclick = () => deleteSegment(s.id);
 
-    actions.append(renameBtn, procBtn, delBtn);
+    actions.append(renameBtn, ...(poseOff ? [] : [procBtn]), delBtn);
     row.append(include, dotWrap, info, actions);
     listEl.appendChild(row);
   }

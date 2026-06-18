@@ -1558,10 +1558,11 @@
                 <option value="heavy">Heavy (max accuracy)</option>
               </select>
             </label>
-            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="3D pose keeps the existing boat-space skeleton pipeline. 2D pose estimates trunk angle directly from MediaPipe image landmarks.">Pose mode:
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="3D pose keeps the existing boat-space skeleton pipeline. 2D pose estimates trunk angle directly from MediaPipe image landmarks. Turn off skips all video analysis — segments still get CSV/track-derived numeric averages.">Pose mode:
               <select id="pose-mode-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
                 <option value="3d" selected>3D pose</option>
                 <option value="2d">2D pose</option>
+                <option value="off">Turn off</option>
               </select>
             </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Minimum MediaPipe trunk landmark certainty for accepting 2D pose trunk angle detections.">2D certainty:

@@ -23,7 +23,6 @@
 
     /* ── Topbar ───────────────────────────────────────────── */
     #topbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; padding: 0 14px; height: var(--topbar-h); background: var(--surface); border-bottom: 1px solid var(--border); position: relative; z-index: 700; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
-    .brand { font-weight: 700; font-size: 17px; color: var(--accent); margin-right: 2px; white-space: nowrap; letter-spacing: .02em; }
     .spacer { flex: 1; }
     .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface2); color: var(--text); cursor: pointer; font-size: 14px; font-weight: 500; transition: background .12s, border-color .12s; white-space: nowrap; line-height: 1; }
     .btn:hover { background: var(--surface); border-color: var(--accent); color: var(--accent-h); }
@@ -196,12 +195,12 @@
     /* ── Layout (analysis view) ───────────────────────────── */
     #main-wrap { display: flex; flex-direction: column; height: calc(100vh - var(--topbar-h)); height: calc(100svh - var(--topbar-h)); height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
     #layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-    #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 280px; min-height: 0; flex-shrink: 0; overflow: hidden; }
-    #layout.phone-playback-active #panel-left { width: max(280px, calc(58% - var(--phone-playback-width, 0px))); }
-    #layout.stat-panel-open #panel-left,
-    #layout.heatmaps-open #panel-left { width: max(280px, calc(58% - var(--side-tools-width, 0px) - var(--phone-playback-width, 0px))); }
-    #map { flex: 1; min-height: 120px; position: relative; }
-
+    #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 0; min-height: 0; flex-shrink: 0; overflow: hidden; }
+    #layout.phone-playback-active #panel-left { width: max(0px, calc(58% - var(--phone-playback-width, 0px))); }
+    #layout.map-col-minimized #panel-left { display: none; }
+    #layout.video-col-minimized #panel-right { display: none; }
+    #map-workspace { position: relative; display: flex; flex: 1; min-height: 120px; min-width: 0; overflow: hidden; }
+    #map { flex: 1 1 auto; min-width: 0; min-height: 120px; position: relative; }
     /* Map controls */
     #map-controls { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; max-height: min(34vh, 280px); overflow-y: auto; overscroll-behavior: contain; }
     #map-ctrl-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; flex-wrap: wrap; }
@@ -304,22 +303,22 @@
     /* Divider */
     #divider { width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
     #divider:hover, #divider.dragging { background: var(--accent); }
+    #inline-heatmap-divider { display: none; width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
+    #layout.heatmaps-open #inline-heatmap-divider { display: block; }
+    #inline-heatmap-divider:hover, #inline-heatmap-divider.dragging { background: var(--accent); }
     #timeline-stat-panel { display: none; flex: 0 0 clamp(220px, 20vw, 320px); min-width: 0; min-height: 0; flex-direction: column; gap: 8px; padding: 8px; background: #101820; border-left: 1px solid rgba(255,255,255,.08); border-right: 1px solid rgba(255,255,255,.08); overflow-y: auto; }
     #layout.stat-panel-open #timeline-stat-panel { display: flex; }
     .timeline-stat-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #8fa1b4; font-size: 10px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
     .timeline-stat-panel-empty { display: flex; align-items: center; justify-content: center; min-height: 90px; border-radius: 10px; background: rgba(255,255,255,.04); color: #8fa1b4; text-align: center; font-size: 12px; line-height: 1.45; padding: 12px; }
     #timeline-stat-panel .video-metric-graph { width: 100%; height: 124px; flex: 0 0 auto; background: rgba(5,9,14,.72); cursor: pointer; pointer-events: auto; }
-    #inline-heatmap-panel { display: none; flex: 0 0 var(--inline-heatmap-width, clamp(220px, 22vw, 340px)); min-width: 0; min-height: 0; gap: 6px; padding: 4px; background: #070b11; border-left: 1px solid rgba(255,255,255,.08); border-right: 1px solid rgba(255,255,255,.08); overflow: hidden; }
+    #inline-heatmap-panel { display: none; flex: 0 0 var(--inline-heatmap-width, clamp(220px, 22vw, 340px)); min-width: 0; min-height: 0; gap: 6px; padding: 4px; background: #070b11; border-left: 1px solid rgba(255,255,255,.08); overflow: hidden; }
     #layout.heatmaps-open #inline-heatmap-panel { display: flex; }
     #inline-heatmap-panel .video-pane-heatmaps { display: flex; flex: 1 1 0; min-width: 0; min-height: 0; flex-direction: column; gap: 6px; overflow-y: auto; padding-right: 1px; }
 
     /* Right panel (analysis view — videos only) */
-    #panel-right { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
-    #layout.phone-playback-active #panel-right { flex-direction: row; }
-    #layout.phone-playback-active #panel-left { min-width: 280px; }
+    #panel-right { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+    #layout.phone-playback-active #panel-left { min-width: 0; }
     #panel-right.maneuver-mode { flex-direction: column !important; background: linear-gradient(180deg, #f7f9fc 0%, #eef3f9 100%); }
-    #panel-right.maneuver-mode #phone-playback-shell,
-    #panel-right.maneuver-mode #phone-playback-divider,
     #panel-right.maneuver-mode #video-grid,
     #panel-right.maneuver-mode #no-video { display: none !important; }
     #maneuver-analysis-shell { display: none; flex: 1; min-height: 0; overflow: auto; background: linear-gradient(180deg, #f7f9fc 0%, #eef3f9 100%); }
@@ -330,6 +329,7 @@
     #phone-playback-divider { display: none; width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
     #layout.phone-playback-active #phone-playback-divider { display: block; }
     #phone-playback-divider:hover, #phone-playback-divider.dragging { background: var(--accent); }
+    #layout.video-col-minimized.phone-playback-active #phone-playback-shell { flex: 1 1 auto !important; width: auto !important; padding: 4px; }
     .phone-playback-pane { width: 100%; }
     .phone-playback-pane .pane-label { left: 10px; right: 10px; max-width: calc(100% - 20px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .phone-playback-pane .empty-state { font-size: 12px; line-height: 1.5; }
@@ -376,7 +376,7 @@
     .video-side-heatmap-meta { font-size: 10px; line-height: 1.45; color: #8fa1b4; }
     .video-side-heatmap-empty { display: flex; align-items: center; justify-content: center; flex: 1; min-height: 0; padding: 12px; border-radius: 8px; background: rgba(7,11,17,.7); color: #8fa1b4; text-align: center; font-size: 11px; line-height: 1.45; }
     .video-side-section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .12em; color: #8fa1b4; padding: 2px 2px 0; }
-    .video-side-stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+    .video-side-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); gap: 6px; }
     .video-side-stat-chip { display: flex; flex-direction: column; gap: 3px; padding: 7px 8px; border-radius: 8px; border: 1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.03); }
     .video-side-stat-key { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: #8fa1b4; }
     .video-side-stat-value { font-size: 14px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
@@ -501,7 +501,7 @@
     /* STL 3D */
     #stl-inline { display: none; flex-direction: column; flex: 0 0 48%; min-height: 0; overflow: hidden; border-top: 1px solid var(--border); }
     #stl-inline.open { display: flex; }
-    #panel-left.stl-open #map { flex: 1 1 52%; min-height: 120px; }
+    #panel-left.stl-open #map-workspace { flex: 1 1 52%; min-height: 120px; }
     #stl-header { display: flex; align-items: center; padding: 0 12px; height: 34px; background: var(--surface2); border-bottom: 1px solid var(--border); gap: 10px; flex-shrink: 0; }
     #stl-header h2 { font-size: 13px; font-weight: 600; flex: 1; margin: 0; color: var(--muted); letter-spacing: .04em; }
     #stl-layout, #heatmap-layout, #maneuver-layout { flex: 1; display: none; grid-template-columns: 220px 1fr; grid-template-rows: 1fr; min-height: 0; }
@@ -525,13 +525,18 @@
     #stl-skel-status { font-size: 13px; color: var(--muted); text-align: center; padding: 6px; }
     #stl-skel-status.ok { color: var(--green); }
     .stl-tune-hint { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: var(--border); color: var(--muted); font-size: 10px; cursor: help; }
-    .stl-tune-grid { display: flex; flex-direction: column; gap: 5px; }
-    .stl-tune-row { display: grid; grid-template-columns: 44px 1fr 54px; align-items: center; gap: 6px; font-size: 12px; color: var(--text); }
-    .stl-tune-row span { color: var(--muted); }
-    .stl-tune-range { width: 100%; accent-color: var(--accent); }
-    .stl-tune-row output { font-size: 11px; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
-    .stl-tune-actions { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
+    .stl-tune-actions { display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
     .stl-tune-actions .btn { flex: 1; white-space: nowrap; }
+    .stl-calib-result { margin-bottom: 4px; }
+    #calib-editor-modal { z-index: 1750; padding: 24px; background: rgba(6,10,15,.74); align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    #calib-editor-box { display: flex; flex-direction: column; gap: 10px; max-width: min(96vw, 1100px); max-height: calc(100vh - 48px); background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    #calib-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    #calib-editor-title { font-size: 15px; font-weight: 700; color: var(--text); }
+    #calib-editor-sub { font-size: 12px; color: var(--muted); margin-top: 2px; max-width: 720px; }
+    #calib-editor-stage { position: relative; overflow: auto; background: #000; border-radius: 10px; display: flex; align-items: center; justify-content: center; min-height: 0; }
+    #calib-editor-canvas { display: block; max-width: 100%; max-height: calc(100vh - 220px); touch-action: none; cursor: crosshair; }
+    #calib-editor-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    #calib-editor-msg { flex: 1; }
     #heatmap-panel { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
     #heatmap-wrap { min-height: 0; overflow: auto; background: #0f141d; padding: 10px; }
     #heatmap-wrap::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -988,13 +993,15 @@
       .video-pane-heatmaps { flex-basis: 185px; }
       .video-side-heatmap { padding: 6px; }
       .video-side-stats-grid { grid-template-columns: 1fr; }
-      #layout.phone-playback-active #panel-right { flex-direction: column; }
       #layout.phone-playback-active #phone-playback-shell { flex: 0 0 220px; padding: 4px 4px 0; }
       #phone-playback-divider, #layout.phone-playback-active #phone-playback-divider { display: none; }
       #video-grid.layout-row,
       #video-grid.layout-2plus1,
       #video-grid.layout-auto { grid-template-columns: 1fr; grid-template-rows: none; }
       #video-grid.layout-2plus1 .video-pane { grid-column: auto !important; grid-row: auto !important; }
+      #layout.heatmaps-open #map-workspace { flex-direction: column; }
+      #layout.heatmaps-open #inline-heatmap-divider { display: none; }
+      #layout.heatmaps-open #inline-heatmap-panel { flex: 0 0 min(42%, 260px) !important; border-left: none; border-top: 1px solid rgba(255,255,255,.08); }
       #map-controls { max-height: min(40vh, 260px); }
       .tl-media-segment { font-size: 7px; padding: 0 4px; }
       .tl-media-segment-kind { min-width: 18px; padding: 0 2px; }
@@ -1066,8 +1073,6 @@
 <!-- Topbar                                                      -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div id="topbar">
-  <span class="brand">TrollFish</span>
-
   <!-- Project hamburger -->
   <div id="project-wrap">
     <button class="btn" id="btn-hamburger">
@@ -1132,7 +1137,7 @@
     <button class="btn danger sm" id="btn-current-seg-delete">Delete</button>
   </div>
   <button class="btn topbar-action" id="btn-stl"><svg class="icon-svg"><use href="#ico-cube"/></svg> Hull 3D</button>
-  <button class="btn topbar-action" id="btn-heatmaps"><svg class="icon-svg"><use href="#ico-activity"/></svg> Heatmaps</button>
+  <button class="btn topbar-action" id="btn-heatmaps"><svg class="icon-svg"><use href="#ico-activity"/></svg> Segment Stats</button>
 
   <!-- Progress circle + queue -->
   <div id="progress-wrap">
@@ -1271,7 +1276,11 @@
   <div id="view-analysis" class="view-panel active-view">
     <div id="layout">
       <div id="panel-left">
-        <div id="map"></div>
+        <div id="map-workspace">
+          <div id="map"></div>
+          <div id="inline-heatmap-divider" aria-hidden="true"></div>
+          <aside id="inline-heatmap-panel" aria-label="Segment stats beside map"></aside>
+        </div>
         <div id="map-controls">
           <div id="map-ctrl-row">
             <!-- Segment creation controls are driven from topbar button; status shown in #seg-status -->
@@ -1299,24 +1308,22 @@
             <aside id="stl-panel">
               <div class="stl-sec"><h3>Camera Presets</h3><div class="stl-cam-grid"><button class="stl-cam-btn" onclick="window.stlSetCamera('default')">Default</button><button class="stl-cam-btn" onclick="window.stlSetCamera('side')">Side</button><button class="stl-cam-btn" onclick="window.stlSetCamera('top')">Top</button><button class="stl-cam-btn" onclick="window.stlSetCamera('front')">Bow</button><button class="stl-cam-btn" onclick="window.stlSetCamera('rear')">Stern</button><button class="stl-cam-btn" onclick="window.stlSetCamera('athlete')">Athlete</button></div></div>
               <div class="stl-sec"><h3>Visibility</h3><label class="stl-tog-row"><span>Hull</span><span class="stl-tog"><input type="checkbox" id="stl-tog-hull" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Skeleton</span><span class="stl-tog"><input type="checkbox" id="stl-tog-skel" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Joints</span><span class="stl-tog"><input type="checkbox" id="stl-tog-joints" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>COM</span><span class="stl-tog"><input type="checkbox" id="stl-tog-com" checked><span class="stl-tog-sl"></span></span></label><label class="stl-tog-row"><span>Grid</span><span class="stl-tog"><input type="checkbox" id="stl-tog-grid" checked><span class="stl-tog-sl"></span></span></label></div>
-              <div class="stl-sec" id="stl-tune-sec">
-                <h3>Camera Pose Tuning <span class="stl-tune-hint" title="Manual offset applied on top of the (Auto-PnP) camera pose to fine-tune where athletes land on the boat. Preview updates live; Save + Re-process bakes it into the analysis.">?</span></h3>
-                <div class="stl-tune-grid">
-                  <label class="stl-tune-row"><span>Pitch</span><input type="range" id="tune-pitch" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-pitch-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>Yaw</span><input type="range" id="tune-yaw" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-yaw-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>Roll</span><input type="range" id="tune-roll" class="stl-tune-range" min="-10" max="10" step="0.1" value="0"><output id="tune-roll-out">0.0°</output></label>
-                  <label class="stl-tune-row"><span>X fwd</span><input type="range" id="tune-x" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-x-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Y lat</span><input type="range" id="tune-y" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-y-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Z up</span><input type="range" id="tune-z" class="stl-tune-range" min="-0.5" max="0.5" step="0.01" value="0"><output id="tune-z-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Hip Z</span><input type="range" id="tune-hipz" class="stl-tune-range" min="-0.2" max="0.2" step="0.005" value="0"><output id="tune-hipz-out">0.00 m</output></label>
-                  <label class="stl-tune-row"><span>Ankle Z</span><input type="range" id="tune-anklez" class="stl-tune-range" min="-0.2" max="0.2" step="0.005" value="0"><output id="tune-anklez-out">0.00 m</output></label>
+              <div class="stl-sec" id="stl-calib-sec">
+                <h3>Camera Calibration <span class="stl-tune-hint" title="Detect the boat keypoints on a clear frame, drag any that are off to their correct pixel location, then re-solve PnP. The corrected camera pose is locked for the whole clip (Auto-PnP disabled) and baked in on Re-process.">?</span></h3>
+                <button class="btn sm" id="btn-calib-start" style="width:100%;">Calibrate keypoints</button>
+                <div id="stl-calib-status" class="heatmap-meta" style="margin-top:6px;">Detects boat keypoints on a high-confidence frame so you can drag them to the correct spot.</div>
+                <div id="stl-calib-actions" style="display:none; margin-top:8px;">
+                  <div class="stl-calib-result heatmap-meta" id="stl-calib-result"></div>
+                  <div class="stl-tune-actions">
+                    <button class="btn sm" id="btn-calib-resolve">Re-solve</button>
+                    <button class="btn sm" id="btn-calib-cancel">Cancel</button>
+                  </div>
+                  <div class="stl-tune-actions">
+                    <button class="btn sm" id="btn-calib-save">Save</button>
+                    <button class="btn sm primary" id="btn-calib-reprocess">Save + Re-process</button>
+                  </div>
+                  <button class="btn sm" id="btn-calib-clear" style="width:100%; margin-top:4px;">Clear calibration (use Auto-PnP)</button>
                 </div>
-                <div class="stl-tune-actions">
-                  <button class="btn sm" id="btn-tune-reset">Reset</button>
-                  <button class="btn sm" id="btn-tune-save">Save</button>
-                  <button class="btn sm primary" id="btn-tune-reprocess">Save + Re-process</button>
-                </div>
-                <div id="stl-tune-status" class="heatmap-meta" style="margin-top:6px;">Live preview only — Save to keep, Re-process to bake into analysis.</div>
               </div>
               <div class="stl-sec" style="flex:1"><div id="stl-skel-status">No skeleton loaded</div></div>
             </aside>
@@ -1378,21 +1385,21 @@
       </div>
 
       <div id="divider"></div>
-      <aside id="inline-heatmap-panel" aria-label="Segment heatmaps beside videos"></aside>
       <aside id="timeline-stat-panel" aria-label="Timeline stat overlay graphs"></aside>
 
-      <div id="panel-right">
-        <div id="phone-playback-shell">
-          <div id="phone-playback-pane" class="video-pane phone-playback-pane" style="display:none;">
-            <div class="video-pane-body">
-              <div class="video-stage" id="phone-playback-stage">
-                <div class="pane-label" id="phone-playback-label" style="color:#fbbf24;">Phone Playback</div>
-                <div id="phone-playback-empty" class="empty-state" style="display:none;">No phone video at this time</div>
-              </div>
+      <div id="phone-playback-shell">
+        <div id="phone-playback-pane" class="video-pane phone-playback-pane" style="display:none;">
+          <div class="video-pane-body">
+            <div class="video-stage" id="phone-playback-stage">
+              <div class="pane-label" id="phone-playback-label" style="color:#fbbf24;">Phone Playback</div>
+              <div id="phone-playback-empty" class="empty-state" style="display:none;">No phone video at this time</div>
             </div>
           </div>
         </div>
-        <div id="phone-playback-divider"></div>
+      </div>
+      <div id="phone-playback-divider"></div>
+
+      <div id="panel-right">
         <div id="video-grid"></div>
         <div id="no-video" class="empty-state" style="padding:20px;">
           <svg class="icon-svg" style="width:40px;height:40px;color:var(--muted)"><use href="#ico-play"/></svg>
@@ -1507,6 +1514,10 @@
             <span>Wind panel</span>
             <span class="stl-tog"><input type="checkbox" id="feature-wind-panel-toggle"><span class="stl-tog-sl"></span></span>
           </label>
+          <label class="stl-tog-row" title="Show the athlete video layout button in the top bar. Hidden by default to save space.">
+            <span>Video layout button</span>
+            <span class="stl-tog"><input type="checkbox" id="video-layout-button-visible-toggle"><span class="stl-tog-sl"></span></span>
+          </label>
           <label class="stl-tog-row" title="Run boom angle predictions during pose and maneuver processing">
             <span>Boom predictions</span>
             <span class="stl-tog"><input type="checkbox" id="feature-boom-predictions-toggle"><span class="stl-tog-sl"></span></span>
@@ -1515,6 +1526,21 @@
             <span>Rudder predictions</span>
             <span class="stl-tog"><input type="checkbox" id="feature-rudder-predictions-toggle"><span class="stl-tog-sl"></span></span>
           </label>
+        </div>
+        <div class="advanced-settings-group">
+          <div class="advanced-settings-title">Live Stats Visibility</div>
+          <div class="advanced-settings-grid">
+            <label class="stl-tog-row"><span>SOG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="sog" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>COG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heading" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Heel</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Pitch</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="pitch" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>VMG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="vmg" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>TWA</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="twa" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Roll M</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Trunk</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="trunk" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Rudder</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Boom</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="boom" checked><span class="stl-tog-sl"></span></span></label>
+          </div>
         </div>
         <div class="advanced-settings-group" id="ath-settings-wrap">
           <div class="advanced-settings-title">Processing And Timeline</div>
@@ -1531,6 +1557,15 @@
                 <option value="full" selected>Full (accurate)</option>
                 <option value="heavy">Heavy (max accuracy)</option>
               </select>
+            </label>
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="3D pose keeps the existing boat-space skeleton pipeline. 2D pose estimates trunk angle directly from MediaPipe image landmarks.">Pose mode:
+              <select id="pose-mode-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
+                <option value="3d" selected>3D pose</option>
+                <option value="2d">2D pose</option>
+              </select>
+            </label>
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Minimum MediaPipe trunk landmark certainty for accepting 2D pose trunk angle detections.">2D certainty:
+              <input type="number" id="pose-2d-threshold-input" min="0" max="1" value="0.8" step="0.05" style="width:62px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;" />
             </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Maximum frame size sent into MediaPipe. Lower is faster; 480 keeps the previous behavior.">Pose size:
               <select id="pose-input-size-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
@@ -1555,9 +1590,47 @@
               <span>Stitch SOG gaps</span>
               <span class="stl-tog"><input type="checkbox" id="tl-sog-gap-stitching-toggle"><span class="stl-tog-sl"></span></span>
             </label>
+            <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Continuously seek the external playback video to the timeline while playing. Off lets the external video free-run after initial load and manual scrubs.">
+              <span>External video continuous sync</span>
+              <span class="stl-tog"><input type="checkbox" id="external-video-continuous-sync-toggle"><span class="stl-tog-sl"></span></span>
+            </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Enable tow filtering for wind estimation">Tow filter:
               <span class="stl-tog"><input type="checkbox" id="advanced-tow-filter-toggle"><span class="stl-tog-sl"></span></span>
             </label>
+          </div>
+        </div>
+        <div class="advanced-settings-group" id="inline-heatmap-menu-settings">
+          <div class="advanced-settings-title">Analysis Segment Stats Menu</div>
+          <div class="advanced-settings-grid">
+            <label class="stl-tog-row" title="Show the keypoint density heatmap in the Analysis heatmaps panel">
+              <span>Keypoint heatmap</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="keypoint" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row" title="Show the center-of-mass density heatmap in the Analysis heatmaps panel">
+              <span>COM heatmap</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="com" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row" title="Show the stats card in the Analysis heatmaps panel">
+              <span>Stats card</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="stats" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row"><span>Avg SOG</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_sog" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row" title="Show TWA in the Analysis live stats bar">
+              <span>TWA live stat</span>
+              <span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_twa" checked><span class="stl-tog-sl"></span></span>
+            </label>
+            <label class="stl-tog-row"><span>Avg Heel</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Pitch</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_pitch" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Roll Moment</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_moment_roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Trunk Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_trunk_angle" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Rudder Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Avg Boom Angle</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="summary_boom" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Trunk plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_trunk" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Rudder plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_rudder" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Boom plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_boom" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Roll moment plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_roll" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Heel plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_heel" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>SOG plot</span><span class="stl-tog"><input type="checkbox" data-inline-heatmap-toggle="plot_sog" checked><span class="stl-tog-sl"></span></span></label>
           </div>
         </div>
         <div class="advanced-settings-group" id="analysis-report-advanced">
@@ -1647,12 +1720,28 @@
     <div id="timeline-media-modal-empty">The file could not be opened from local storage.</div>
   </div>
 </div>
+<div id="calib-editor-modal" class="modal-ov">
+  <div id="calib-editor-box" role="dialog" aria-modal="true" aria-labelledby="calib-editor-title">
+    <div id="calib-editor-head">
+      <div>
+        <div id="calib-editor-title">Boat keypoint calibration</div>
+        <div id="calib-editor-sub">Drag each labelled point onto its true location on the boat, then Apply to re-solve the camera pose.</div>
+      </div>
+      <button class="btn" id="btn-calib-editor-close">Cancel</button>
+    </div>
+    <div id="calib-editor-stage"><canvas id="calib-editor-canvas"></canvas></div>
+    <div id="calib-editor-foot">
+      <div id="calib-editor-msg" class="heatmap-meta"></div>
+      <button class="btn primary" id="btn-calib-editor-apply">Apply &amp; re-solve</button>
+    </div>
+  </div>
+</div>
 <div id="assign-popup"></div>
 <div id="report-blocking-overlay"><div id="report-blocking-number"></div></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script type="module">
-  const appVersion = '20260604pose2';
+  const appVersion = '20260615edgecolumns1';
   const sameFolderApp = `./app.js?v=${appVersion}`;
   const fastApiApp = `/static/app.js?v=${appVersion}`;
   const isLocalDev = ['localhost', '127.0.0.1'].includes(window.location.hostname);

@@ -42,10 +42,6 @@ function vec3cross(a, b) {
 }
 function vec3len(v) { return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); }
 function vec3norm(v) { const l=vec3len(v); return l<1e-12?[0,0,0]:[v[0]/l,v[1]/l,v[2]/l]; }
-function isFinitePoint3(p) {
-  return Array.isArray(p) && p.length >= 3
-    && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]);
-}
 
 // ── Rotation matrices ─────────────────────────────────────────────────
 
@@ -77,44 +73,6 @@ export function defaultCameraPoseAndRotation(pitch = 14.7, yaw = 0.0, roll = 0.0
   const R_rel = mat3mul(rotZ(roll), mat3mul(rotY(yaw), rotX(-pitch)));
   const R_wc = mat3mul(BASE_ROT, R_rel);
   return { pos, R_wc };
-}
-
-/**
- * Apply a manual tuning offset on top of an existing (e.g. Auto-PnP-estimated)
- * camera pose. The angle offsets are applied in the camera's own relative frame
- * — i.e. R_wc_new = R_wc @ Rz(dRoll) @ Ry(dYaw) @ Rx(-dPitch) — matching the
- * convention in defaultCameraPoseAndRotation(). Position offsets add directly to
- * the camera world position. Returns NEW arrays; inputs are not mutated.
- *
- * @param {number[9]} R_wc — current camera-to-world rotation (row-major 3×3)
- * @param {number[3]} camPos — current camera world position
- * @param {object} offset — { pitch_deg, yaw_deg, roll_deg, x_m, y_m, z_m }
- * @returns {{R_wc:number[9], camPos:number[3]}}
- */
-export function applyCameraPoseOffset(R_wc, camPos, offset = {}) {
-  const dPitch = Number(offset.pitch_deg) || 0;
-  const dYaw   = Number(offset.yaw_deg) || 0;
-  const dRoll  = Number(offset.roll_deg) || 0;
-  const dx = Number(offset.x_m) || 0;
-  const dy = Number(offset.y_m) || 0;
-  const dz = Number(offset.z_m) || 0;
-
-  let Rout = R_wc;
-  if (dPitch || dYaw || dRoll) {
-    const R_rel = mat3mul(rotZ(dRoll), mat3mul(rotY(dYaw), rotX(-dPitch)));
-    Rout = mat3mul(R_wc, R_rel);
-  }
-  return {
-    R_wc: Rout,
-    camPos: [camPos[0] + dx, camPos[1] + dy, camPos[2] + dz],
-  };
-}
-
-/** True if a camera_pose_offset object has any non-zero component. */
-export function cameraPoseOffsetIsActive(offset) {
-  if (!offset || typeof offset !== 'object') return false;
-  return ['pitch_deg', 'yaw_deg', 'roll_deg', 'x_m', 'y_m', 'z_m', 'hip_z_m', 'ankle_z_m']
-    .some(k => Number(offset[k]) || 0);
 }
 
 // ── Ray construction ──────────────────────────────────────────────────
@@ -213,320 +171,6 @@ function rotationFromTwoVectors(a1, a2, b1, b2) {
 
 // ── Skeleton placement ────────────────────────────────────────────────
 
-const DEFAULT_HIKING_PLACEMENT = Object.freeze({
-  enabled: true,
-  kneePlaneZ: 0.05,
-  normalHipWeight: 2.0,
-  normalAnkleWeight: 1.0,
-  hikingKneeWeight: 8.0,
-  hikingHipWeight: 0.4,
-  hikingAnkleWeight: 0.25,
-  hipOutsideAbsY: 0.6,
-  xStabilityEnabled: true,
-  xStabilitySigmaM: 0.18,
-  xStabilityMinScale: 0.2,
-  xStabilityAlpha: 0.25,
-  xStabilityPositionBlend: 0.65,
-  xStabilityMaxStepM: 0.04,
-  xStabilityReacquireThresholdM: 0.28,
-  xStabilityReacquireFrames: 3,
-  xStabilityReacquireAgreementM: 0.22,
-  xStabilityReacquireAlpha: 0.7,
-  heightNormalizationEnabled: true,
-  heightScaleAlpha: 0.12,
-  heightScaleMin: 0.75,
-  heightScaleMax: 1.35,
-});
-
-function _numOr(value, fallback) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-function _normalizeHikingPlacementOptions(options = {}) {
-  const raw = options.hikingPlacement || options.hiking_placement || {};
-  return {
-    enabled: raw.enabled !== false,
-    kneePlaneZ: _numOr(raw.kneePlaneZ ?? raw.knee_plane_z, DEFAULT_HIKING_PLACEMENT.kneePlaneZ),
-    normalHipWeight: _numOr(raw.normalHipWeight ?? raw.normal_hip_weight, DEFAULT_HIKING_PLACEMENT.normalHipWeight),
-    normalAnkleWeight: _numOr(raw.normalAnkleWeight ?? raw.normal_ankle_weight, DEFAULT_HIKING_PLACEMENT.normalAnkleWeight),
-    hikingKneeWeight: _numOr(raw.hikingKneeWeight ?? raw.knee_weight, DEFAULT_HIKING_PLACEMENT.hikingKneeWeight),
-    hikingHipWeight: _numOr(raw.hikingHipWeight ?? raw.hip_weight, DEFAULT_HIKING_PLACEMENT.hikingHipWeight),
-    hikingAnkleWeight: _numOr(raw.hikingAnkleWeight ?? raw.ankle_weight, DEFAULT_HIKING_PLACEMENT.hikingAnkleWeight),
-    hipOutsideAbsY: _numOr(raw.hipOutsideAbsY ?? raw.hip_outside_abs_y, DEFAULT_HIKING_PLACEMENT.hipOutsideAbsY),
-    xStabilityEnabled: raw.xStabilityEnabled ?? raw.x_stability_enabled ?? DEFAULT_HIKING_PLACEMENT.xStabilityEnabled,
-    xStabilitySigmaM: _numOr(raw.xStabilitySigmaM ?? raw.x_stability_sigma_m, DEFAULT_HIKING_PLACEMENT.xStabilitySigmaM),
-    xStabilityMinScale: _numOr(raw.xStabilityMinScale ?? raw.x_stability_min_scale, DEFAULT_HIKING_PLACEMENT.xStabilityMinScale),
-    xStabilityAlpha: _numOr(raw.xStabilityAlpha ?? raw.x_stability_alpha, DEFAULT_HIKING_PLACEMENT.xStabilityAlpha),
-    xStabilityPositionBlend: _numOr(raw.xStabilityPositionBlend ?? raw.x_stability_position_blend, DEFAULT_HIKING_PLACEMENT.xStabilityPositionBlend),
-    xStabilityMaxStepM: _numOr(raw.xStabilityMaxStepM ?? raw.x_stability_max_step_m, DEFAULT_HIKING_PLACEMENT.xStabilityMaxStepM),
-    xStabilityReacquireThresholdM: _numOr(raw.xStabilityReacquireThresholdM ?? raw.x_stability_reacquire_threshold_m, DEFAULT_HIKING_PLACEMENT.xStabilityReacquireThresholdM),
-    xStabilityReacquireFrames: _numOr(raw.xStabilityReacquireFrames ?? raw.x_stability_reacquire_frames, DEFAULT_HIKING_PLACEMENT.xStabilityReacquireFrames),
-    xStabilityReacquireAgreementM: _numOr(raw.xStabilityReacquireAgreementM ?? raw.x_stability_reacquire_agreement_m, DEFAULT_HIKING_PLACEMENT.xStabilityReacquireAgreementM),
-    xStabilityReacquireAlpha: _numOr(raw.xStabilityReacquireAlpha ?? raw.x_stability_reacquire_alpha, DEFAULT_HIKING_PLACEMENT.xStabilityReacquireAlpha),
-    heightNormalizationEnabled: raw.heightNormalizationEnabled ?? raw.height_normalization_enabled ?? DEFAULT_HIKING_PLACEMENT.heightNormalizationEnabled,
-    heightScaleAlpha: _numOr(raw.heightScaleAlpha ?? raw.height_scale_alpha, DEFAULT_HIKING_PLACEMENT.heightScaleAlpha),
-    heightScaleMin: _numOr(raw.heightScaleMin ?? raw.height_scale_min, DEFAULT_HIKING_PLACEMENT.heightScaleMin),
-    heightScaleMax: _numOr(raw.heightScaleMax ?? raw.height_scale_max, DEFAULT_HIKING_PLACEMENT.heightScaleMax),
-  };
-}
-
-function _avgPoint(points) {
-  if (!points.length) return null;
-  const sum = points.reduce((acc, p) => vec3add(acc, p), [0, 0, 0]);
-  return vec3scale(sum, 1 / points.length);
-}
-
-function _dist3(a, b) {
-  if (!isFinitePoint3(a) || !isFinitePoint3(b)) return null;
-  return vec3len(vec3sub(a, b));
-}
-
-function _normalizeAthleteHeightM(height) {
-  const h = Number(height);
-  if (!Number.isFinite(h) || h <= 0) return null;
-  const metres = h > 3 ? h / 100 : h;
-  return metres >= 1.0 && metres <= 2.4 ? metres : null;
-}
-
-function _estimateWorldSkeletonHeight(worldLandmarks) {
-  const midShoulder = _avgPoint([11, 12].filter(i => isFinitePoint3(worldLandmarks[i])).map(i => worldLandmarks[i]));
-  const head = _avgPoint([0, 7, 8, 9, 10].filter(i => isFinitePoint3(worldLandmarks[i])).map(i => worldLandmarks[i]));
-  const neckHead = _dist3(midShoulder, head);
-  const headTopAllowance = neckHead != null ? neckHead * 0.35 : 0.12;
-
-  const chains = [];
-  for (const [hipIdx, kneeIdx, ankleIdx] of [[23, 25, 27], [24, 26, 28]]) {
-    const hip = worldLandmarks[hipIdx];
-    const knee = worldLandmarks[kneeIdx];
-    const ankle = worldLandmarks[ankleIdx];
-    const thigh = _dist3(hip, knee);
-    const shank = _dist3(knee, ankle);
-    const trunk = _dist3(hip, midShoulder);
-    if (thigh != null && shank != null && trunk != null && neckHead != null) {
-      chains.push(thigh + shank + trunk + neckHead + headTopAllowance);
-    }
-  }
-  return chains.length ? chains.reduce((sum, v) => sum + v, 0) / chains.length : null;
-}
-
-function _scaleWorldLandmarksForPlacement(worldLandmarks, athleteHeight, cfg, state = null) {
-  if (!cfg?.heightNormalizationEnabled) return { worldLandmarks, scale: 1, measuredHeight: null, applied: false };
-  const targetHeight = _normalizeAthleteHeightM(athleteHeight);
-  if (targetHeight == null) return { worldLandmarks, scale: 1, measuredHeight: null, targetHeight, applied: false };
-
-  const measuredHeight = _estimateWorldSkeletonHeight(worldLandmarks);
-  if (!Number.isFinite(measuredHeight) || measuredHeight <= 0) {
-    return { worldLandmarks, scale: 1, measuredHeight: measuredHeight ?? null, targetHeight, applied: false };
-  }
-
-  const minScale = Math.max(0.2, Number(cfg.heightScaleMin) || DEFAULT_HIKING_PLACEMENT.heightScaleMin);
-  const maxScale = Math.max(minScale, Number(cfg.heightScaleMax) || DEFAULT_HIKING_PLACEMENT.heightScaleMax);
-  const rawScale = Math.max(minScale, Math.min(maxScale, targetHeight / measuredHeight));
-  const alpha = Math.max(0.01, Math.min(1, Number(cfg.heightScaleAlpha) || DEFAULT_HIKING_PLACEMENT.heightScaleAlpha));
-  const scale = state
-    ? (Number.isFinite(state.heightScale) ? state.heightScale + alpha * (rawScale - state.heightScale) : rawScale)
-    : rawScale;
-  if (state) state.heightScale = scale;
-  if (Math.abs(scale - 1) < 0.005) return { worldLandmarks, scale: 1, measuredHeight, targetHeight, applied: false };
-
-  const anchor = _avgPoint([23, 24].filter(i => isFinitePoint3(worldLandmarks[i])).map(i => worldLandmarks[i])) || [0, 0, 0];
-  const scaled = {};
-  for (let i = 0; i < 33; i++) {
-    const p = worldLandmarks[i];
-    if (!isFinitePoint3(p)) continue;
-    scaled[i] = [
-      anchor[0] + (p[0] - anchor[0]) * scale,
-      anchor[1] + (p[1] - anchor[1]) * scale,
-      anchor[2] + (p[2] - anchor[2]) * scale,
-    ];
-  }
-  return { worldLandmarks: scaled, scale, measuredHeight, targetHeight, applied: true };
-}
-
-function _buildAnchorMeasurement(anchor, worldLandmarks, normLandmarks, K, W, H, camPos, R_wc) {
-  const weight = Number(anchor.weight);
-  if (!(weight > 0)) return null;
-
-  const intersections = [];
-  for (const idx of anchor.rayIndices) {
-    const nrm = normLandmarks[idx];
-    if (!nrm) continue;
-    const ray = rayFromNormLandmark(nrm[0], nrm[1], W, H, K);
-    const pt = intersectWorldZPlane(ray, R_wc, camPos, anchor.z);
-    if (pt) intersections.push(pt);
-  }
-  if (!intersections.length) return null;
-
-  const mpPoints = anchor.mpIndices
-    .filter(i => isFinitePoint3(worldLandmarks[i]))
-    .map(i => worldLandmarks[i]);
-  const mpMid = _avgPoint(mpPoints);
-  if (!mpMid) return null;
-
-  const worldAvg = _avgPoint(intersections);
-  const mpWorld = mat3vec(R_wc, mpMid);
-  const offset = vec3sub(worldAvg, mpWorld);
-  offset[2] = anchor.z - mpWorld[2];
-
-  return {
-    name: anchor.name || 'anchor',
-    offset,
-    baseWeight: weight,
-    weight,
-    xStabilityScale: 1.0,
-  };
-}
-
-function _median(values) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-function _span(values) {
-  const finite = values.filter(Number.isFinite);
-  if (finite.length < 2) return 0;
-  return Math.max(...finite) - Math.min(...finite);
-}
-
-function _applyHikingXStability(measurements, cfg, state = null) {
-  if (!cfg?.xStabilityEnabled || measurements.length < 2) {
-    return { targetX: null, applied: false, stableX: Number.isFinite(state?.stableX) ? state.stableX : null };
-  }
-
-  const candidateXs = measurements.map(m => m.candidateX).filter(Number.isFinite);
-  const priorX = Number.isFinite(state?.stableX) ? state.stableX : null;
-  const targetX = priorX ?? _median(candidateXs);
-  const sigma = Math.max(0.01, Number(cfg.xStabilitySigmaM) || DEFAULT_HIKING_PLACEMENT.xStabilitySigmaM);
-  const minScale = Math.max(0, Math.min(1, Number(cfg.xStabilityMinScale) || 0));
-  if (!Number.isFinite(targetX)) return { targetX: null, applied: false, stableX: null };
-
-  for (const m of measurements) {
-    const dx = Math.abs(m.candidateX - targetX);
-    const gaussian = Math.exp(-0.5 * (dx / sigma) ** 2);
-    const scale = minScale + (1 - minScale) * gaussian;
-    m.xStabilityScale = scale;
-    m.weight = m.baseWeight * scale;
-  }
-  return { targetX, applied: true, stableX: priorX };
-}
-
-function _buildPlacedSkeletonFromAnchors(worldLandmarks, normLandmarks, K, W, H, camPos, R_wc, anchors, fusion = null) {
-  const measurements = [];
-  for (const anchor of anchors) {
-    const measurement = _buildAnchorMeasurement(anchor, worldLandmarks, normLandmarks, K, W, H, camPos, R_wc);
-    if (measurement) measurements.push(measurement);
-  }
-
-  const hipMpMid = _avgPoint([23, 24].filter(i => isFinitePoint3(worldLandmarks[i])).map(i => worldLandmarks[i]));
-  const hipWorldNoTranslation = hipMpMid ? mat3vec(R_wc, hipMpMid) : null;
-  for (const m of measurements) {
-    m.candidateX = (hipWorldNoTranslation ? hipWorldNoTranslation[0] : 0) + m.offset[0];
-  }
-
-  const fusionMeta = fusion?.mode === 'hiking_x_stability'
-    ? _applyHikingXStability(measurements, fusion.config, fusion.state)
-    : { targetX: null, applied: false };
-
-  let translationSum = [0, 0, 0];
-  let totalWeight = 0;
-  for (const m of measurements) {
-    translationSum = vec3add(translationSum, vec3scale(m.offset, m.weight));
-    totalWeight += m.weight;
-  }
-
-  if (totalWeight < 0.01) return null;
-  const translation = vec3scale(translationSum, 1 / totalWeight);
-  const rawFusedX = (hipWorldNoTranslation ? hipWorldNoTranslation[0] : 0) + translation[0];
-  let fusedX = rawFusedX;
-  let stableX = fusionMeta.stableX ?? null;
-  let xPositionCorrection = 0;
-  let xReacquireActive = false;
-  if (fusion?.mode === 'hiking_x_stability' && fusion?.state && fusionMeta.applied && Number.isFinite(rawFusedX)) {
-    const priorX = Number.isFinite(fusion.state.stableX) ? fusion.state.stableX : null;
-    const candidateSpread = _span(measurements.map(m => m.candidateX));
-    const reacquireThreshold = Math.max(0.01, Number(fusion.config?.xStabilityReacquireThresholdM) || DEFAULT_HIKING_PLACEMENT.xStabilityReacquireThresholdM);
-    const reacquireFrames = Math.max(1, Math.round(Number(fusion.config?.xStabilityReacquireFrames) || DEFAULT_HIKING_PLACEMENT.xStabilityReacquireFrames));
-    const reacquireAgreement = Math.max(0.01, Number(fusion.config?.xStabilityReacquireAgreementM) || DEFAULT_HIKING_PLACEMENT.xStabilityReacquireAgreementM);
-    if (priorX != null && Math.abs(rawFusedX - priorX) >= reacquireThreshold && candidateSpread <= reacquireAgreement) {
-      fusion.state.xReacquireCount = (Number(fusion.state.xReacquireCount) || 0) + 1;
-    } else {
-      fusion.state.xReacquireCount = 0;
-    }
-    xReacquireActive = fusion.state.xReacquireCount >= reacquireFrames;
-
-    if (priorX != null) {
-      const blend = xReacquireActive ? 0 : Math.max(0, Math.min(1, Number(fusion.config?.xStabilityPositionBlend) || 0));
-      let correctedX = rawFusedX + blend * (priorX - rawFusedX);
-      const maxStep = Number(fusion.config?.xStabilityMaxStepM);
-      if (!xReacquireActive && Number.isFinite(maxStep) && maxStep > 0) {
-        correctedX = Math.max(priorX - maxStep, Math.min(priorX + maxStep, correctedX));
-      }
-      xPositionCorrection = correctedX - rawFusedX;
-      translation[0] += xPositionCorrection;
-      fusedX = correctedX;
-    }
-    const alpha = xReacquireActive
-      ? Math.max(0.01, Math.min(1, Number(fusion.config?.xStabilityReacquireAlpha) || DEFAULT_HIKING_PLACEMENT.xStabilityReacquireAlpha))
-      : Math.max(0.01, Math.min(1, Number(fusion.config?.xStabilityAlpha) || DEFAULT_HIKING_PLACEMENT.xStabilityAlpha));
-    stableX = Number.isFinite(fusion.state.stableX)
-      ? fusion.state.stableX + alpha * (fusedX - fusion.state.stableX)
-      : fusedX;
-    fusion.state.stableX = stableX;
-  }
-
-  const placed = {};
-  for (let i = 0; i < 33; i++) {
-    const lm = worldLandmarks[i];
-    if (!lm) continue;
-    placed[i] = vec3add(mat3vec(R_wc, lm), translation);
-  }
-  _attachPlacementMeta(placed, {
-    fusionTargetX: fusionMeta.targetX,
-    fusionStableX: stableX,
-    fusionRawX: rawFusedX,
-    fusionXCorrection: xPositionCorrection,
-    fusionXReacquireActive: xReacquireActive,
-    fusionXReacquireCount: Number(fusion?.state?.xReacquireCount) || 0,
-    xStabilityApplied: fusionMeta.applied,
-    anchorWeights: measurements.map(m => ({
-      name: m.name,
-      baseWeight: m.baseWeight,
-      weight: m.weight,
-      x: m.candidateX,
-      xStabilityScale: m.xStabilityScale,
-    })),
-  });
-  return placed;
-}
-
-function _attachPlacementMeta(placed, meta) {
-  if (placed && typeof placed === 'object') {
-    Object.defineProperty(placed, '__placementMeta', {
-      value: Object.freeze({ ...meta }),
-      enumerable: false,
-      configurable: true,
-    });
-  }
-  return placed;
-}
-
-function _detectHikingFromNormalPlacement(placed, cfg) {
-  const leftHip = placed?.[23];
-  const rightHip = placed?.[24];
-  if (![leftHip, rightHip].every(isFinitePoint3)) return null;
-
-  const hipMid = vec3scale(vec3add(leftHip, rightHip), 0.5);
-  if (Math.abs(hipMid[1]) < cfg.hipOutsideAbsY) return null;
-
-  return {
-    hipMid,
-    side: hipMid[1] >= 0 ? 1 : -1,
-  };
-}
-
 /**
  * Primary placement path: symmetric raycast.
  * Preserves MediaPipe body orientation, solves global translation from
@@ -541,79 +185,90 @@ function _detectHikingFromNormalPlacement(placed, cfg) {
  * @param {number[9]} R_wc — camera-to-world rotation
  * @param {number} zHip — hip plane height
  * @param {number} zAnkle — ankle/foot plane height
- * @param {Object} options — optional placement tuning, including hikingPlacement
  * @returns {Object|null} {0..32: [x,y,z]} in world frame
  */
 export function computePlacedSkeletonSymmetricRaycast(
-  worldLandmarks, normLandmarks, K, W, H, camPos, R_wc, zHip, zAnkle, options = {}
+  worldLandmarks, normLandmarks, K, W, H, camPos, R_wc, zHip, zAnkle
 ) {
   // We need at least hips + one lower limb landmark
   const lm23w = worldLandmarks[23];
   const lm24w = worldLandmarks[24];
   if (!lm23w || !lm24w) return null;
-  const hikingCfg = _normalizeHikingPlacementOptions(options);
-  const normalAnchors = [
-    { name: 'hip', rayIndices: [23, 24], mpIndices: [23, 24], z: zHip, weight: hikingCfg.normalHipWeight },
-    { name: 'ankle', rayIndices: [27, 28, 31, 32], mpIndices: [27, 28], z: zAnkle, weight: hikingCfg.normalAnkleWeight },
-  ];
-  const normalPlaced = _buildPlacedSkeletonFromAnchors(
-    worldLandmarks, normLandmarks, K, W, H, camPos, R_wc, normalAnchors
-  );
-  if (!normalPlaced) return null;
 
-  let placed = normalPlaced;
-  let placementMeta = {
-    mode: 'normal',
-    hikingDetected: false,
-    kneePlaneZ: null,
-  };
+  // Get MP body orientation (world coords are in camera frame)
+  // We only need to solve the global translation; rotation comes from MP
 
-  if (hikingCfg.enabled) {
-    const hikingState = _detectHikingFromNormalPlacement(normalPlaced, hikingCfg);
-    if (hikingState) {
-      if (options.hikingFusionState) {
-        if (options.hikingFusionState.side !== hikingState.side) {
-          options.hikingFusionState.stableX = null;
-          options.hikingFusionState.xReacquireCount = 0;
-        }
-        options.hikingFusionState.side = hikingState.side;
-      }
-      const heightNorm = _scaleWorldLandmarksForPlacement(
-        worldLandmarks,
-        options.athleteHeight,
-        hikingCfg,
-        options.hikingFusionState || null
-      );
-      const placementWorldLandmarks = heightNorm.worldLandmarks;
-      const hikingAnchors = [
-        { name: 'hip', rayIndices: [23, 24], mpIndices: [23, 24], z: zHip, weight: hikingCfg.hikingHipWeight },
-        { name: 'knee', rayIndices: [25, 26], mpIndices: [25, 26], z: hikingCfg.kneePlaneZ, weight: hikingCfg.hikingKneeWeight },
-        { name: 'ankle', rayIndices: [27, 28, 31, 32], mpIndices: [27, 28], z: zAnkle, weight: hikingCfg.hikingAnkleWeight },
-      ];
-      const hikingPlaced = _buildPlacedSkeletonFromAnchors(
-        placementWorldLandmarks, normLandmarks, K, W, H, camPos, R_wc, hikingAnchors,
-        { mode: 'hiking_x_stability', config: hikingCfg, state: options.hikingFusionState || null }
-      );
-      if (hikingPlaced) {
-        const hikingFusionMeta = hikingPlaced.__placementMeta || {};
-        placed = hikingPlaced;
-        placementMeta = {
-          ...hikingFusionMeta,
-          mode: 'hiking',
-          hikingDetected: true,
-          kneePlaneZ: hikingCfg.kneePlaneZ,
-          heightNormalizationApplied: heightNorm.applied,
-          heightNormalizationScale: heightNorm.scale,
-          heightNormalizationMeasuredHeight: heightNorm.measuredHeight,
-          heightNormalizationTargetHeight: heightNorm.targetHeight,
-          side: hikingState.side,
-        };
-      }
-    } else if (options.hikingFusionState) {
-      options.hikingFusionState.stableX = null;
-      options.hikingFusionState.side = null;
-      options.hikingFusionState.xReacquireCount = 0;
+  // Compute hip midpoint in MP world coords
+  const hipMidMp = vec3scale(vec3add(lm23w, lm24w), 0.5);
+
+  // Try to get raycast anchor points for hip plane
+  const hipIntersections = [];
+  for (const idx of [23, 24]) {
+    const nrm = normLandmarks[idx];
+    if (!nrm) continue;
+    const ray = rayFromNormLandmark(nrm[0], nrm[1], W, H, K);
+    const pt = intersectWorldZPlane(ray, R_wc, camPos, zHip);
+    if (pt) hipIntersections.push({ idx, pt });
+  }
+
+  const ankleIntersections = [];
+  for (const idx of [27, 28, 31, 32]) {
+    const nrm = normLandmarks[idx];
+    if (!nrm) continue;
+    const ray = rayFromNormLandmark(nrm[0], nrm[1], W, H, K);
+    const pt = intersectWorldZPlane(ray, R_wc, camPos, zAnkle);
+    if (pt) ankleIntersections.push({ idx, pt });
+  }
+
+  if (hipIntersections.length === 0 && ankleIntersections.length === 0) return null;
+
+  // Compute weighted translation offset
+  // Hip anchor: average of hip intersections → should map to hip midpoint
+  let translationSum = [0, 0, 0];
+  let totalWeight = 0;
+
+  if (hipIntersections.length >= 1) {
+    const hipWorldAvg = vec3scale(
+      hipIntersections.reduce((s, h) => vec3add(s, h.pt), [0,0,0]),
+      1 / hipIntersections.length
+    );
+    // The MP world coords are in camera frame. Transform to world:
+    const hipMpWorld = mat3vec(R_wc, hipMidMp);
+    const offset = vec3sub(hipWorldAvg, hipMpWorld);
+    // Set Z to zHip explicitly
+    offset[2] = zHip - hipMpWorld[2];
+    translationSum = vec3add(translationSum, vec3scale(offset, 2.0)); // weight=2 for hips
+    totalWeight += 2.0;
+  }
+
+  if (ankleIntersections.length >= 1) {
+    // Average ankle intersection
+    const ankleWorldAvg = vec3scale(
+      ankleIntersections.reduce((s, a) => vec3add(s, a.pt), [0,0,0]),
+      1 / ankleIntersections.length
+    );
+    // Ankle midpoint in MP world
+    const anklePts = [27, 28].filter(i => worldLandmarks[i]).map(i => worldLandmarks[i]);
+    if (anklePts.length > 0) {
+      const ankleMidMp = vec3scale(anklePts.reduce((s, p) => vec3add(s, p), [0,0,0]), 1/anklePts.length);
+      const ankleMpWorld = mat3vec(R_wc, ankleMidMp);
+      const offset = vec3sub(ankleWorldAvg, ankleMpWorld);
+      offset[2] = zAnkle - ankleMpWorld[2];
+      translationSum = vec3add(translationSum, vec3scale(offset, 1.0)); // weight=1 for ankles
+      totalWeight += 1.0;
     }
+  }
+
+  if (totalWeight < 0.01) return null;
+  const translation = vec3scale(translationSum, 1 / totalWeight);
+
+  // Apply: transform all MP landmarks to world and add translation
+  const placed = {};
+  for (let i = 0; i < 33; i++) {
+    const lm = worldLandmarks[i];
+    if (!lm) continue;
+    const worldPt = vec3add(mat3vec(R_wc, lm), translation);
+    placed[i] = worldPt;
   }
 
   // Flip disambiguation: check upright (shoulders above hips, head above hips)
@@ -625,7 +280,7 @@ export function computePlacedSkeletonSymmetricRaycast(
     // This is a rare edge case; skip for now
   }
 
-  return _attachPlacementMeta(placed, placementMeta);
+  return placed;
 }
 
 function _avgZ(skeleton, indices) {

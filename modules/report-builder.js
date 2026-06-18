@@ -236,6 +236,19 @@ function sliceTrackByVideoRange(index, startS, endS) {
   return rows.slice(lo, hi);
 }
 
+function sliceTrackByTsRange(index, startTs, endTs) {
+  const start = Number(startTs);
+  const end = Number(endTs);
+  const rows = index?.rows || [];
+  if (!rows.length || !Number.isFinite(start) || !Number.isFinite(end)) return [];
+  if (!index.tsSorted) {
+    return rows.filter(p => Number.isFinite(Number(p?.ts)) && Number(p.ts) >= start && Number(p.ts) <= end);
+  }
+  const lo = _lowerBound(index.tsVals, start);
+  const hi = _upperBound(index.tsVals, end);
+  return rows.slice(lo, hi);
+}
+
 function sliceMetricsByVideoRange(index, startS, endS) {
   const start = Number(startS);
   const end = Number(endS);
@@ -295,6 +308,39 @@ function computeSogFromTrackIndexed(index, startS, endS) {
     sogs.push(speed);
     lats.push((pts[i].lat + pts[i - 1].lat) / 2);
     lons.push((pts[i].lon + pts[i - 1].lon) / 2);
+  }
+  return { times, sogs, lats, lons };
+}
+
+function computeSogFromTsTrack(points) {
+  const pts = (Array.isArray(points) ? points : [])
+    .filter(p => Number.isFinite(Number(p?.ts)))
+    .slice()
+    .sort((a, b) => Number(a.ts) - Number(b.ts));
+  if (pts.length < 1) return { times: [], sogs: [], lats: [], lons: [] };
+  const directTimes = [], directSogs = [], directLats = [], directLons = [];
+  for (const p of pts) {
+    const sog = Number(p?.sog);
+    if (!Number.isFinite(sog) || sog < 0 || sog > 50) continue;
+    directTimes.push(Number(p.ts));
+    directSogs.push(sog);
+    directLats.push(Number.isFinite(Number(p?.lat)) ? Number(p.lat) : null);
+    directLons.push(Number.isFinite(Number(p?.lon)) ? Number(p.lon) : null);
+  }
+  if (directSogs.length) return { times: directTimes, sogs: directSogs, lats: directLats, lons: directLons };
+
+  const gps = pts.filter(p => Number.isFinite(Number(p?.lat)) && Number.isFinite(Number(p?.lon)));
+  const times = [], sogs = [], lats = [], lons = [];
+  for (let i = 1; i < gps.length; i++) {
+    const dt = Number(gps[i].ts) - Number(gps[i - 1].ts);
+    if (dt < 0.01) continue;
+    const dist = haversineM(Number(gps[i - 1].lat), Number(gps[i - 1].lon), Number(gps[i].lat), Number(gps[i].lon));
+    const speed = (dist / dt) * 1.94384;
+    if (speed > 50) continue;
+    times.push((Number(gps[i].ts) + Number(gps[i - 1].ts)) / 2);
+    sogs.push(speed);
+    lats.push((Number(gps[i].lat) + Number(gps[i - 1].lat)) / 2);
+    lons.push((Number(gps[i].lon) + Number(gps[i - 1].lon)) / 2);
   }
   return { times, sogs, lats, lons };
 }
@@ -1278,6 +1324,10 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
   for (const [fid, pts] of Object.entries(videoTrackPointsByFile)) {
     trackIndexByFile[fid] = buildTrackIndex(pts);
   }
+  const csvTrackIndexByFile = {};
+  for (const [fid, pts] of Object.entries(csvTrackPointsByFile)) {
+    csvTrackIndexByFile[fid] = buildTrackIndex(pts);
+  }
   report('Preparing report inputs...', 0.14);
   await yieldReportWork();
 
@@ -1373,6 +1423,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
   };
 
   // 3. Identify video files
+  const filesById = Object.fromEntries((files || []).map(file => [file.id, file]));
   const videoFiles = files.filter(f => f.kind === 'video' && !f.playback_only);
   const metricsByFile = new Map();
   const loadMetricsCached = async (fileId) => {
@@ -1455,6 +1506,37 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
     // For each overlapping file, collect skeleton + metrics + GPS data
     const perAthlete = {}; // athleteId → accumulated data
 
+    const getOrCreateAccumulator = (athIdRaw, fallbackName = 'Unassigned', fallbackColor = null) => {
+      const athId = athIdRaw || 'unassigned';
+      const ath = athletes.find(a => a.id === athId);
+      const athName = ath?.name || fallbackName || 'Unassigned';
+      const athColor = ath?.color || fallbackColor || null;
+      if (!perAthlete[athId]) {
+        perAthlete[athId] = {
+          athlete_id: athId, athlete_name: athName,
+          athlete_color: athColor,
+          trunk_angles: [], moments_pitch: [], moments_roll: [],
+          com_xs: [], com_ys: [], com_zs: [],
+          trunk_angle_time: [], moment_time: [], pitch_moment_time: [],
+          all_keypoints_xy: [], all_com_xy: [],
+          lr_hip_y_diffs: [],
+          sog_times: [], sog_vals: [], sog_lats: [], sog_lons: [],
+          heel_vals: [], heel_time: [],
+          pitch_vals: [], pitch_time: [],
+          rudder_vals: [], rudder_time: [],
+          boom_vals: [], boom_time: [],
+          heading_vals: [], heading_time: [],
+          com_y_time: [],
+          gps_path: [],
+          metrics_in_range: [],
+          vmg_samples: [],
+          file_ids: new Set(),
+        };
+      }
+      return perAthlete[athId];
+    };
+    const csvCoveredRangesByFile = new Map();
+
     for (let overlapIdx = 0; overlapIdx < overlapping.length; overlapIdx++) {
       const { file, meta, trackPts, trackIndex } = overlapping[overlapIdx];
       // Resolve athlete: direct assignment → derive from matched CSV
@@ -1467,37 +1549,21 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         }
       }
       if (!athId) athId = 'unassigned';
-      const ath = athletes.find(a => a.id === athId);
-      const athName = ath?.name || 'Unassigned';
-      const athColor = ath?.color || null;
-
-      if (!perAthlete[athId]) {
-        perAthlete[athId] = {
-          athlete_id: athId, athlete_name: athName,
-          athlete_color: athColor,
-          trunk_angles: [], moments_pitch: [], moments_roll: [],
-          com_xs: [], com_ys: [], com_zs: [],
-          trunk_angle_time: [], moment_time: [], pitch_moment_time: [],
-          all_keypoints_xy: [], all_com_xy: [],
-          lr_hip_y_diffs: [],
-          sog_times: [], sog_vals: [], sog_lats: [], sog_lons: [],
-          heel_vals: [], heel_time: [],
-          rudder_vals: [], rudder_time: [],
-          boom_vals: [], boom_time: [],
-          heading_vals: [], heading_time: [],
-          com_y_time: [],
-          gps_path: [],
-          metrics_in_range: [],
-          vmg_samples: [],
-        };
-      }
-      const acc = perAthlete[athId];
+      const acc = getOrCreateAccumulator(athId, 'Unassigned', null);
+      acc.file_ids.add(file.id);
       const bestCsvId = bestCsvByVideo[file.id] ? String(bestCsvByVideo[file.id]) : null;
 
       // Convert segment epoch range to video_s range
       const vsStart = absTs2VideoSecIndexed(trackIndex, seg.tsStart);
       const vsEnd = absTs2VideoSecIndexed(trackIndex, seg.tsEnd);
       if (vsStart == null || vsEnd == null) continue;
+      if (bestCsvId) {
+        const trackStartTs = trackIndex.tsSorted ? trackIndex.tsVals[0] : Number(trackPts?.[0]?.ts);
+        const trackEndTs = trackIndex.tsSorted ? trackIndex.tsVals[trackIndex.tsVals.length - 1] : Number(trackPts?.[trackPts.length - 1]?.ts);
+        const covered = csvCoveredRangesByFile.get(bestCsvId) || [];
+        covered.push([Math.max(segStartSec, trackStartTs), Math.min(segEndSec, trackEndTs)]);
+        csvCoveredRangesByFile.set(bestCsvId, covered);
+      }
       const normalizeSegmentTime = (t) => {
         const n = Number(t);
         if (!Number.isFinite(n)) return null;
@@ -1600,6 +1666,16 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         acc.heel_time.push({ t, v: p.heel });
       }
 
+      const pitchPts = rangeTrackPts.filter(p => p.trim != null || p.pitch != null);
+      for (const p of pitchPts) {
+        const t = toSegmentT(p.video_s);
+        if (!Number.isFinite(t)) continue;
+        const pitch = p.trim != null ? Number(p.trim) : Number(p.pitch);
+        if (!Number.isFinite(pitch)) continue;
+        acc.pitch_vals.push(pitch);
+        acc.pitch_time.push({ t, v: pitch });
+      }
+
       const headingPts = rangeTrackPts.filter(p => p.hdg != null || p.cog != null);
       for (const p of headingPts) {
         const t = toSegmentT(p.video_s);
@@ -1642,6 +1718,98 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
       await yieldReportWork();
     }
 
+    const isCsvPointCoveredByVideo = (csvFid, ts) => {
+      const t = Number(ts);
+      if (!Number.isFinite(t)) return false;
+      const ranges = csvCoveredRangesByFile.get(String(csvFid)) || [];
+      return ranges.some(([start, end]) => Number.isFinite(start) && Number.isFinite(end) && t >= start && t <= end);
+    };
+
+    const csvEntries = Object.entries(csvTrackPointsByFile || {});
+    for (let csvIdx = 0; csvIdx < csvEntries.length; csvIdx++) {
+      const [csvFid, csvPtsAll] = csvEntries[csvIdx];
+      const csvIndex = csvTrackIndexByFile[csvFid] || buildTrackIndex(csvPtsAll);
+      const rangeTrackPts = sliceTrackByTsRange(csvIndex, segStartSec, segEndSec)
+        .filter(p => !isCsvPointCoveredByVideo(csvFid, p?.ts));
+      if (!rangeTrackPts.length) continue;
+
+      const meta = fileMeta[csvFid] || {};
+      let athId = meta.athlete_id || null;
+      if (!athId) athId = 'unassigned';
+      const csvFile = filesById[csvFid] || {};
+      const fallbackName = csvFile.filename || meta.filename || 'CSV Track';
+      const acc = getOrCreateAccumulator(athId, fallbackName, null);
+      acc.file_ids.add(csvFid);
+      const normalizeSegmentTime = (absTs) => {
+        const t = absTs2SegmentSec(absTs, segStartSec);
+        if (!Number.isFinite(t)) return null;
+        if (t < -0.35 || t > segmentDuration + 0.35) return null;
+        return Math.max(0, Math.min(segmentDuration, t));
+      };
+      const bestCsvId = String(csvFid);
+
+      const sog = computeSogFromTsTrack(rangeTrackPts);
+      for (let i = 0; i < sog.times.length; i++) {
+        const t = normalizeSegmentTime(sog.times[i]);
+        if (!Number.isFinite(t)) continue;
+        acc.sog_times.push(t);
+        acc.sog_vals.push(sog.sogs[i]);
+        acc.sog_lats.push(sog.lats[i]);
+        acc.sog_lons.push(sog.lons[i]);
+      }
+
+      for (const p of rangeTrackPts) {
+        const t = normalizeSegmentTime(p?.ts);
+        if (!Number.isFinite(t)) continue;
+
+        const heel = Number(p?.heel);
+        if (Number.isFinite(heel)) {
+          acc.heel_vals.push(heel);
+          acc.heel_time.push({ t, v: heel });
+        }
+
+        const pitch = p?.trim != null ? Number(p.trim) : Number(p?.pitch);
+        if (Number.isFinite(pitch)) {
+          acc.pitch_vals.push(pitch);
+          acc.pitch_time.push({ t, v: pitch });
+        }
+
+        const headingRaw = p?.hdg != null ? Number(p.hdg) : Number(p?.cog);
+        const heading = normalizeHeadingDeg(headingRaw);
+        if (heading != null) {
+          acc.heading_vals.push(heading);
+          acc.heading_time.push({ t, v: heading });
+        }
+
+        if (Number.isFinite(Number(p?.ts)) && (p?.cog != null || p?.hdg != null)) {
+          const motionDirDeg = p?.cog != null ? Number(p.cog) : Number(p.hdg);
+          const sogKts = Number.isFinite(Number(p?.sog))
+            ? Number(p.sog)
+            : findNearestSog(acc.sog_times, acc.sog_vals, t);
+          acc.vmg_samples.push({
+            t,
+            absTs: Number(p.ts),
+            sogKts,
+            motionDirDeg,
+            localWindKey: bestCsvId,
+          });
+        }
+
+        if (Number.isFinite(Number(p?.lat)) && Number.isFinite(Number(p?.lon))) {
+          const sogAtPoint = acc.sog_vals.length > 0
+            ? findNearestSog(acc.sog_times, acc.sog_vals, t)
+            : (Number.isFinite(Number(p?.sog)) ? Number(p.sog) : null);
+          acc.gps_path.push({ lat: Number(p.lat), lon: Number(p.lon), sog: sogAtPoint });
+        }
+      }
+
+      reportSegmentProgress(
+        `Analyzing segment: ${seg.name} (${csvIdx + 1}/${Math.max(1, csvEntries.length)} CSV tracks)`,
+        0.80 + 0.10 * ((csvIdx + 1) / Math.max(1, csvEntries.length))
+      );
+      await yieldReportWork();
+    }
+
     // Build per-athlete results for this segment
     const athleteResults = [];
     const athleteEntries = Object.entries(perAthlete);
@@ -1653,6 +1821,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
       sortTimelineByTInPlace(acc.moment_time);
       sortTimelineByTInPlace(acc.pitch_moment_time);
       sortTimelineByTInPlace(acc.heel_time);
+      sortTimelineByTInPlace(acc.pitch_time);
       sortTimelineByTInPlace(acc.rudder_time);
       sortTimelineByTInPlace(acc.boom_time);
       sortTimelineByTInPlace(acc.heading_time);
@@ -1688,7 +1857,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         name: seg.name,
         start_s: seg.tsStart,
         end_s: seg.tsEnd,
-        file_id: overlapping.map(o => o.file.id),
+        file_id: acc.file_ids instanceof Set ? Array.from(acc.file_ids) : overlapping.map(o => o.file.id),
         athlete_id: athId,
         athlete_name: acc.athlete_name,
         athlete_color: acc.athlete_color || null,
@@ -1700,6 +1869,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
         moment_pitch: stats(acc.moments_pitch, true),
         trunk_angle: stats(acc.trunk_angles),
         heel: stats(acc.heel_vals),
+        pitch: stats(acc.pitch_vals),
         rudder: stats(acc.rudder_vals),
         boom: stats(acc.boom_vals),
         vmg_summary: vmg.summary,
@@ -1723,6 +1893,7 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
           timelineMaxPoints
         ),
         heel_timeline: subsampleTimeSeries(acc.heel_time, timelineMaxPoints),
+        pitch_timeline: subsampleTimeSeries(acc.pitch_time, timelineMaxPoints),
         rudder_timeline: subsampleTimeSeries(acc.rudder_time, timelineMaxPoints),
         boom_timeline: subsampleTimeSeries(acc.boom_time, timelineMaxPoints),
         heading_timeline: subsampleTimeSeries(acc.heading_time, timelineMaxPoints),

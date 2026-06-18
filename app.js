@@ -2,11 +2,11 @@
 /* ── Browser-side modules (IndexedDB, GPS parsing, matching) ──── */
 import * as DB from './modules/db.js';
 import * as FM from './modules/file-manager.js';
-import * as Pipeline from './modules/pipeline.js?v=20260604pose2';
-import * as PoseEngine from './modules/pose-engine.js?v=20260604pose2';
+import * as Pipeline from './modules/pipeline.js?v=20260612csvmap1';
+import * as PoseEngine from './modules/pose-engine.js?v=20260611pose2d1';
 import * as Storage from './modules/storage.js';
 import { matchVideoTracksToCsv } from './modules/matcher.js?v=20260527detail1';
-import { buildReportData, generateDensityGrid } from './modules/report-builder.js?v=20260604pose2';
+import { buildReportData, generateDensityGrid } from './modules/report-builder.js?v=20260615csvsegstats1';
 import { generatePdf, renderKdeHistogram } from './modules/report-pdf.js?v=20260527detail1';
 import {
   DEFAULT_MANEUVER_DETECTION_SETTINGS,
@@ -102,7 +102,10 @@ const state = {
     expandedOverlayType: null,
     expandedOverlayKey: null,
     previousVideoLayout: null,
+    hoverSegmentId: null,
+    widthPx: null,
   },
+  inlineHeatmapMenuVisibility: {},
   reportOptions: {
     summaryStats: true,
     histograms: true,
@@ -124,6 +127,15 @@ const state = {
   timelineStatsWindowSec: 1,
   timelineStatOverlayGraph: false,
   timelineSogGapStitching: false,
+  externalVideoContinuousTimeSync: false,
+  videoLayoutButtonVisible: false,
+  analysisColumns: {
+    mapMinimized: false,
+    videoMinimized: false,
+  },
+  timelineStatVisibility: {},
+  poseMode: '3d',
+  poseMinConfidence: 0.8,
   poseInputMaxDim: 480,
   poseExactSegmentSeek: false,
   timelineMetricOverlayPrefs: {},
@@ -194,8 +206,17 @@ const HIDDEN_VIDEO_SLOTS_KEY_PREFIX = 'trollfish_hiddenVideoSlots_';
 const TL_STATS_WINDOW_KEY = 'trollfish_tlStatsWindowSec_v1';
 const TL_STATS_OVERLAY_GRAPH_KEY = 'trollfish_tlStatsOverlayGraph_v1';
 const TL_SOG_GAP_STITCHING_KEY = 'trollfish_tlSogGapStitching_v1';
+const EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY = 'trollfish_externalVideoContinuousTimeSync_v1';
+const VIDEO_LAYOUT_BUTTON_VISIBLE_KEY = 'trollfish_videoLayoutButtonVisible_v1';
+const ANALYSIS_COLUMNS_KEY = 'trollfish_analysisColumns_v1';
+const ANALYSIS_COLUMN_COLLAPSE_PX = 18;
+const TIMELINE_STAT_VISIBILITY_KEY = 'trollfish_timelineStatVisibility_v1';
+const POSE_MODE_KEY = 'trollfish_poseMode_v1';
+const POSE_MIN_CONFIDENCE_KEY = 'trollfish_poseMinConfidence_v1';
 const POSE_INPUT_MAX_DIM_KEY = 'trollfish_poseInputMaxDim_v1';
 const POSE_EXACT_SEGMENT_SEEK_KEY = 'trollfish_poseExactSegmentSeek_v1';
+const INLINE_HEATMAP_MENU_VISIBILITY_KEY = 'trollfish_inlineHeatmapMenuVisibility_v1';
+const INLINE_HEATMAP_PANEL_WIDTH_KEY = 'trollfish_inlineHeatmapPanelWidth_v1';
 const API_CSV_CONFIG_KEY = 'trollfish_apiCsvConfig_v1';
 const REPORT_OPTIONS_KEY = 'trollfish_reportOptions_v1';
 const REPORT_HISTORY_KEY_PREFIX = 'trollfish_reportHistory_';
@@ -211,6 +232,37 @@ const DEFAULT_ADVANCED_FEATURES = Object.freeze({
   boomPredictions: true,
   rudderPredictions: true,
 });
+const DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY = Object.freeze({
+  keypoint: false,
+  com: false,
+  stats: true,
+  summary_sog: true,
+  summary_twa: false,
+  summary_heel: true,
+  summary_pitch: true,
+  summary_moment_roll: false,
+  summary_trunk_angle: true,
+  summary_rudder: false,
+  summary_boom: false,
+  plot_trunk: false,
+  plot_rudder: false,
+  plot_boom: false,
+  plot_roll: false,
+  plot_heel: false,
+  plot_sog: false,
+});
+const TIMELINE_STAT_HEATMAP_VISIBILITY_KEYS = Object.freeze({
+  sog: ['summary_sog'],
+  twa: ['summary_twa'],
+  heel: ['summary_heel'],
+  pitch: ['summary_pitch'],
+  roll: ['summary_moment_roll', 'plot_roll'],
+  trunk: ['summary_trunk_angle'],
+  rudder: ['summary_rudder', 'plot_rudder'],
+  boom: ['summary_boom', 'plot_boom'],
+});
+const INLINE_HEATMAP_PANEL_MIN_WIDTH = 220;
+const INLINE_HEATMAP_PANEL_MAX_WIDTH = 720;
 const IS_IPAD = (() => {
   if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
@@ -228,8 +280,8 @@ const _timelineProcessedMetricCache = new Map(); // `${projectId}:${fileId}` -> 
 let _timelineMetricLoadToken = 0;
 const TIMELINE_METRIC_LOAD_ABORTED = 'timeline_metric_load_aborted';
 const TIMELINE_PROCESSED_STATS_REFRESH_MS = 90;
-// Timeline stat readouts refresh at 1 Hz and show the mean of the trailing second.
-const TIMELINE_STATS_UI_REFRESH_MS = 1000;
+// Timeline stat readouts refresh at 3 Hz and show the mean of the trailing second.
+const TIMELINE_STATS_UI_REFRESH_MS = 1000 / 3;
 const TIMELINE_STATS_MEAN_WINDOW_SEC = 1;
 // During playback the timeline advances every animation frame (~60fps) for smooth
 // video, but the secondary timeline UI (markers, SOG canvas, labels, layout, stats)
@@ -360,6 +412,86 @@ function setTimelineSogGapStitching(enabled) {
   updateTimelineStats();
 }
 
+function loadExternalVideoContinuousTimeSyncSetting() {
+  state.externalVideoContinuousTimeSync = !!loadJsonLocal(EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY, false);
+  const toggle = el('external-video-continuous-sync-toggle');
+  if (toggle) toggle.checked = !!state.externalVideoContinuousTimeSync;
+}
+
+function setExternalVideoContinuousTimeSync(enabled) {
+  state.externalVideoContinuousTimeSync = !!enabled;
+  saveJsonLocal(EXTERNAL_VIDEO_CONTINUOUS_TIME_SYNC_KEY, state.externalVideoContinuousTimeSync);
+  const toggle = el('external-video-continuous-sync-toggle');
+  if (toggle) toggle.checked = !!state.externalVideoContinuousTimeSync;
+  state.phonePlayback.lastDriftCorrectAt = 0;
+  if (state.phonePlayback.enabled) {
+    syncPhonePlaybackToTimeline({ forceSeek: true, forceReload: false });
+  }
+}
+
+function isExternalVideoContinuousTimeSyncEnabled() {
+  return !!state.externalVideoContinuousTimeSync;
+}
+
+function loadVideoLayoutButtonVisibilitySetting() {
+  state.videoLayoutButtonVisible = !!loadJsonLocal(VIDEO_LAYOUT_BUTTON_VISIBLE_KEY, false);
+  const toggle = el('video-layout-button-visible-toggle');
+  if (toggle) toggle.checked = !!state.videoLayoutButtonVisible;
+  syncVideoLayoutButton();
+}
+
+function setVideoLayoutButtonVisible(enabled) {
+  state.videoLayoutButtonVisible = !!enabled;
+  saveJsonLocal(VIDEO_LAYOUT_BUTTON_VISIBLE_KEY, state.videoLayoutButtonVisible);
+  const toggle = el('video-layout-button-visible-toggle');
+  if (toggle) toggle.checked = !!state.videoLayoutButtonVisible;
+  syncVideoLayoutButton();
+}
+
+function normalizeTimelineStatVisibility(raw = {}) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const out = {};
+  for (const def of TIMELINE_STAT_DEFS) {
+    out[def.key] = input[def.key] == null ? true : !!input[def.key];
+  }
+  return out;
+}
+
+function loadTimelineStatVisibilitySetting() {
+  state.timelineStatVisibility = normalizeTimelineStatVisibility(loadJsonLocal(TIMELINE_STAT_VISIBILITY_KEY, {}));
+  syncTimelineStatVisibilityInputs();
+}
+
+function saveTimelineStatVisibilitySetting() {
+  saveJsonLocal(TIMELINE_STAT_VISIBILITY_KEY, normalizeTimelineStatVisibility(state.timelineStatVisibility));
+}
+
+function isTimelineStatUserVisible(metricKey) {
+  const visibility = normalizeTimelineStatVisibility(state.timelineStatVisibility);
+  return visibility[metricKey] !== false;
+}
+
+function syncTimelineStatVisibilityInputs() {
+  const visibility = normalizeTimelineStatVisibility(state.timelineStatVisibility);
+  document.querySelectorAll('[data-timeline-stat-toggle]').forEach(input => {
+    const key = input.getAttribute('data-timeline-stat-toggle');
+    if (key in visibility) input.checked = visibility[key] !== false;
+  });
+}
+
+function setTimelineStatVisible(metricKey, visible) {
+  if (!TIMELINE_STAT_DEFS.some(def => def.key === metricKey)) return;
+  state.timelineStatVisibility = normalizeTimelineStatVisibility({
+    ...(state.timelineStatVisibility || {}),
+    [metricKey]: !!visible,
+  });
+  saveTimelineStatVisibilitySetting();
+  syncTimelineStatVisibilityInputs();
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+  updateTimelineStats(true);
+}
+
 function normalizePoseInputMaxDim(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return 480;
@@ -368,13 +500,43 @@ function normalizePoseInputMaxDim(value) {
   return 480;
 }
 
+function normalizePoseMode(value) {
+  return String(value || '').toLowerCase() === '2d' ? '2d' : '3d';
+}
+
+function normalizePoseMinConfidence(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return 0.8;
+  return Math.max(0, Math.min(1, Math.round(num * 100) / 100));
+}
+
 function loadPoseProcessingSettings() {
+  state.poseMode = normalizePoseMode(loadJsonLocal(POSE_MODE_KEY, '3d'));
+  state.poseMinConfidence = normalizePoseMinConfidence(loadJsonLocal(POSE_MIN_CONFIDENCE_KEY, 0.8));
   state.poseInputMaxDim = normalizePoseInputMaxDim(loadJsonLocal(POSE_INPUT_MAX_DIM_KEY, 480));
   state.poseExactSegmentSeek = !!loadJsonLocal(POSE_EXACT_SEGMENT_SEEK_KEY, false);
+  const modeSelect = el('pose-mode-select');
+  if (modeSelect) modeSelect.value = state.poseMode;
+  const thresholdInput = el('pose-2d-threshold-input');
+  if (thresholdInput) thresholdInput.value = String(state.poseMinConfidence);
   const sizeSelect = el('pose-input-size-select');
   if (sizeSelect) sizeSelect.value = String(state.poseInputMaxDim);
   const exactToggle = el('pose-exact-segment-seek-toggle');
   if (exactToggle) exactToggle.checked = !!state.poseExactSegmentSeek;
+}
+
+function setPoseMode(value) {
+  state.poseMode = normalizePoseMode(value);
+  saveJsonLocal(POSE_MODE_KEY, state.poseMode);
+  const modeSelect = el('pose-mode-select');
+  if (modeSelect) modeSelect.value = state.poseMode;
+}
+
+function setPoseMinConfidence(value) {
+  state.poseMinConfidence = normalizePoseMinConfidence(value);
+  saveJsonLocal(POSE_MIN_CONFIDENCE_KEY, state.poseMinConfidence);
+  const thresholdInput = el('pose-2d-threshold-input');
+  if (thresholdInput) thresholdInput.value = String(state.poseMinConfidence);
 }
 
 function setPoseInputMaxDim(value) {
@@ -389,6 +551,126 @@ function setPoseExactSegmentSeek(enabled) {
   saveJsonLocal(POSE_EXACT_SEGMENT_SEEK_KEY, state.poseExactSegmentSeek);
   const exactToggle = el('pose-exact-segment-seek-toggle');
   if (exactToggle) exactToggle.checked = !!state.poseExactSegmentSeek;
+}
+
+function normalizeInlineHeatmapMenuVisibility(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  const out = { ...DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY };
+  for (const key of Object.keys(out)) {
+    if (input[key] != null) out[key] = !!input[key];
+  }
+  return out;
+}
+
+function syncInlineHeatmapMenuVisibilityInputs() {
+  const visibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  state.inlineHeatmapMenuVisibility = visibility;
+  document.querySelectorAll('[data-inline-heatmap-toggle]').forEach(input => {
+    const key = input.getAttribute('data-inline-heatmap-toggle');
+    if (!key || !(key in DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY)) return;
+    input.checked = visibility[key] !== false;
+  });
+}
+
+function loadInlineHeatmapMenuVisibilitySetting() {
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility(
+    loadJsonLocal(INLINE_HEATMAP_MENU_VISIBILITY_KEY, DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY),
+  );
+  syncInlineHeatmapMenuVisibilityInputs();
+}
+
+function saveInlineHeatmapMenuVisibilitySetting() {
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  saveJsonLocal(INLINE_HEATMAP_MENU_VISIBILITY_KEY, state.inlineHeatmapMenuVisibility);
+}
+
+function clampInlineHeatmapPanelWidth(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  const workspace = el('map-workspace');
+  const dividerW = el('inline-heatmap-divider')?.offsetWidth || 0;
+  const available = workspace?.clientWidth
+    ? Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, workspace.clientWidth - dividerW - 140)
+    : INLINE_HEATMAP_PANEL_MAX_WIDTH;
+  const maxW = Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, available));
+  return Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(maxW, Math.round(num)));
+}
+
+function applyInlineHeatmapPanelWidth(widthPx, persist = false) {
+  const clamped = clampInlineHeatmapPanelWidth(widthPx);
+  if (!Number.isFinite(clamped)) return null;
+  state.inlineHeatmaps.widthPx = clamped;
+  el('layout')?.style.setProperty('--inline-heatmap-width', `${clamped}px`);
+  if (persist) {
+    try { localStorage.setItem(INLINE_HEATMAP_PANEL_WIDTH_KEY, String(clamped)); } catch {}
+  }
+  return clamped;
+}
+
+function loadInlineHeatmapPanelWidthSetting() {
+  let saved = null;
+  try { saved = localStorage.getItem(INLINE_HEATMAP_PANEL_WIDTH_KEY); } catch {}
+  if (saved != null && saved !== '') applyInlineHeatmapPanelWidth(Number(saved), false);
+}
+
+function isInlineHeatmapMenuItemVisible(key) {
+  const visibility = normalizeInlineHeatmapMenuVisibility(state.inlineHeatmapMenuVisibility);
+  return visibility[key] !== false;
+}
+
+function isTimelineStatVisibleByHeatmapMenu(metricKey) {
+  const linkedKeys = TIMELINE_STAT_HEATMAP_VISIBILITY_KEYS[metricKey];
+  if (!Array.isArray(linkedKeys) || linkedKeys.length === 0) return true;
+  if (!isInlineHeatmapMenuItemVisible('stats')) return false;
+  return linkedKeys.every(key => isInlineHeatmapMenuItemVisible(key));
+}
+
+function hasTimelineWindAvailable() {
+  if (hasResolvedWindEstimate(state.wind?.localNow)) return true;
+  if (hasResolvedWindEstimate(state.wind?.session)) return true;
+  return Object.values(state.wind?.byCsvId || {}).some(wind => hasResolvedWindEstimate(wind));
+}
+
+function isWindTimelineStat(metricKey) {
+  return metricKey === 'vmg' || metricKey === 'twa' || metricKey === 'cwa';
+}
+
+function refreshTimelineStatsForWindAvailabilityChange() {
+  const windAvailable = hasTimelineWindAvailable();
+  if (state.wind._statsWindAvailable === windAvailable) return;
+  state.wind._statsWindAvailable = windAvailable;
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+}
+
+function getVisibleTimelineStatDefs() {
+  const windAvailable = hasTimelineWindAvailable();
+  return TIMELINE_STAT_DEFS.filter(def => (
+    isTimelineStatUserVisible(def.key)
+    && isTimelineStatVisibleByHeatmapMenu(def.key)
+    && (!isWindTimelineStat(def.key) || windAvailable)
+  ));
+}
+
+function refreshInlineHeatmapsForMenuVisibilityChange() {
+  syncTimelineOverlayMetricSelectionAcrossSlots();
+  populateTimelineStats();
+  if (!state.inlineHeatmaps?.visible) return;
+  closeInlineHeatmapPlotOverlay();
+  state.inlineHeatmaps.renderedSegmentId = null;
+  state.inlineHeatmaps.renderedLoadToken = 0;
+  syncInlineHeatmapsToCurrentSegment();
+}
+
+function setInlineHeatmapMenuItemVisible(key, visible) {
+  if (!key || !(key in DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY)) return;
+  state.inlineHeatmapMenuVisibility = normalizeInlineHeatmapMenuVisibility({
+    ...(state.inlineHeatmapMenuVisibility || {}),
+    [key]: !!visible,
+  });
+  saveInlineHeatmapMenuVisibilitySetting();
+  syncInlineHeatmapMenuVisibilityInputs();
+  refreshInlineHeatmapsForMenuVisibilityChange();
 }
 
 function syncManeuverDetectionInputs() {
@@ -1760,8 +2042,9 @@ function ensurePhonePlaybackDom() {
   phone.labelEl = label;
   if (!phone.videoEl) {
     const video = document.createElement('video');
-    video.muted = true;
-    video.defaultMuted = true;
+    video.muted = false;
+    video.defaultMuted = false;
+    video.volume = 1;
     video.playsInline = true;
     video.setAttribute('playsinline', '');
     video.setAttribute('webkit-playsinline', '');
@@ -1784,9 +2067,9 @@ function ensurePhonePlaybackDom() {
 
 function getPhonePlaybackRightMinWidth() {
   if (window.matchMedia('(max-width: 760px)').matches) return 220;
-  const phoneDividerW = el('phone-playback-divider')?.offsetWidth || 5;
   const shellW = Math.max(180, Number(state.phonePlayback?.savedShellWidthPx) || 260);
-  const videoMinW = 240;
+  const phoneDividerW = state.analysisColumns?.videoMinimized ? 0 : (el('phone-playback-divider')?.offsetWidth || 5);
+  const videoMinW = state.analysisColumns?.videoMinimized ? 0 : 240;
   return shellW + phoneDividerW + videoMinW;
 }
 
@@ -1813,34 +2096,32 @@ function syncPhonePlaybackShellSize() {
   const layout = el('layout');
   const panelRight = el('panel-right');
   const shell = el('phone-playback-shell');
-  const divider = el('phone-playback-divider');
   if (!layout || !panelRight || !shell) return;
   const active = layout.classList.contains('phone-playback-active');
   const compact = window.matchMedia('(max-width: 760px)').matches;
-  if (!active || compact) {
+  if (!active || compact || layout.classList.contains('video-col-minimized')) {
     shell.style.width = '';
     shell.style.flex = '';
     syncPhonePlaybackMapOffset();
     return;
   }
 
-  const dividerW = divider?.offsetWidth || 0;
-  const totalW = panelRight.clientWidth - dividerW;
+  const totalW = Math.round((shell.getBoundingClientRect().width || 0) + (panelRight.getBoundingClientRect().width || 0));
   if (!(totalW > 0)) return;
-  const minW = 180;
-  const maxW = Math.max(minW, totalW - 240);
-  const lockedGridW = Number(state.phonePlayback?.savedVideoGridWidthPx);
-  let nextW = Number.NaN;
-  if (Number.isFinite(lockedGridW)) {
-    const gridMinW = 240;
-    const clampedGridW = Math.max(gridMinW, Math.min(lockedGridW, totalW - minW));
-    if (clampedGridW !== lockedGridW) setPhonePlaybackGridWidth(clampedGridW);
-    nextW = Math.max(minW, Math.min(totalW - clampedGridW, maxW));
-  } else {
-    const fallbackW = Math.round(totalW * 0.32);
-    nextW = Math.max(minW, Math.min(Number(state.phonePlayback?.savedShellWidthPx) || fallbackW, maxW));
-  }
+  // Keep the GoPro/phone shell at its saved pixel width and let the external
+  // video grid flex to fill the rest. Sizing the shell (not the grid) keeps the
+  // grid filling the page edge-to-edge with no overflow or gap when the total
+  // available width changes (e.g. dragging the map↔video divider).
+  const minW = 0;
+  // Reserve room so the external grid never gets squeezed below its min width.
+  const minGridW = 240;
+  const maxW = Math.max(minW, totalW - minGridW);
+  const savedShellW = Number(state.phonePlayback?.savedShellWidthPx);
+  const fallbackW = Math.round(totalW * 0.32);
+  const nextW = Math.max(minW, Math.min(Number.isFinite(savedShellW) ? savedShellW : fallbackW, maxW));
   state.phonePlayback.savedShellWidthPx = nextW;
+  // Record the grid width purely for bookkeeping; panel-right stays flex:1.
+  setPhonePlaybackGridWidth(totalW - nextW);
   shell.style.width = `${nextW}px`;
   shell.style.flex = `0 0 ${nextW}px`;
   syncPhonePlaybackMapOffset();
@@ -1863,7 +2144,8 @@ function syncPhonePlaybackMapOffset() {
     return;
   }
 
-  const shellW = Math.max(0, Number(state.phonePlayback?.savedShellWidthPx) || shell?.getBoundingClientRect().width || 0);
+  const savedShellW = Number(state.phonePlayback?.savedShellWidthPx);
+  const shellW = Math.max(0, Number.isFinite(savedShellW) ? savedShellW : (shell?.getBoundingClientRect().width || 0));
   const dividerW = divider?.offsetWidth || 0;
   const totalW = shellW + dividerW;
   layout.style.setProperty('--phone-playback-width', `${totalW}px`);
@@ -1873,32 +2155,37 @@ function syncPhonePlaybackMapOffset() {
       state.phonePlayback.savedLeftWidthPx = left.getBoundingClientRect().width;
     }
     const base = Number(state.phonePlayback.savedLeftWidthPx) || left.getBoundingClientRect().width;
-    left.style.width = `max(${PHONE_PLAYBACK_LEFT_MIN_WIDTH}px, calc(${Math.round(base)}px - var(--phone-playback-width, 0px)))`;
+    left.style.width = `max(0px, calc(${Math.round(base)}px - var(--phone-playback-width, 0px)))`;
   }
 }
 
 function lockPhonePlaybackGridWidth() {
-  const grid = el('video-grid');
-  if (!grid) return;
-  const width = Math.round(grid.getBoundingClientRect().width || 0);
+  const panelRight = el('panel-right');
+  if (!panelRight) return;
+  const width = Math.round(panelRight.getBoundingClientRect().width || 0);
   if (!(width > 0)) return;
   setPhonePlaybackGridWidth(width);
 }
 
 function setPhonePlaybackGridWidth(width) {
-  const grid = el('video-grid');
-  if (!grid) return;
-  const next = Math.max(240, Math.round(Number(width) || 0));
+  // The external video grid (#panel-right) always flexes to fill whatever
+  // width is left after the GoPro/phone shell. We only record the intended
+  // grid width so the shell can be sized from it; we never pin panel-right to
+  // a fixed pixel width (that caused overflow / gaps when the map↔video
+  // divider changed the total available width).
+  const panelRight = el('panel-right');
+  if (!panelRight) return;
+  const next = Math.max(0, Math.round(Number(width) || 0));
   state.phonePlayback.savedVideoGridWidthPx = next;
-  grid.style.flex = `0 0 ${next}px`;
-  grid.style.width = `${next}px`;
+  panelRight.style.flex = '1';
+  panelRight.style.width = '';
 }
 
 function unlockPhonePlaybackGridWidth() {
-  const grid = el('video-grid');
-  if (!grid) return;
-  grid.style.flex = '';
-  grid.style.width = '';
+  const panelRight = el('panel-right');
+  if (!panelRight) return;
+  panelRight.style.flex = '';
+  panelRight.style.width = '';
   state.phonePlayback.savedVideoGridWidthPx = null;
 }
 
@@ -1954,6 +2241,9 @@ async function switchPhonePlaybackSource(item, videoSec, autoPlayAfterLoad = fal
   }
 
   const videoEl = phone.videoEl;
+  videoEl.muted = false;
+  videoEl.defaultMuted = false;
+  try { videoEl.volume = 1; } catch {}
   const sameSource = !forceReload
     && videoEl._loadedFileId === fileId
     && videoEl._loadedURL === url
@@ -1993,6 +2283,8 @@ async function switchPhonePlaybackSource(item, videoSec, autoPlayAfterLoad = fal
   phone.lastDriftCorrectAt = 0;
   setPhonePlaybackVisible(item, true);
   try { videoEl.playbackRate = state.tl.playbackRate; } catch {}
+  videoEl.muted = false;
+  try { videoEl.volume = 1; } catch {}
   if (autoPlayAfterLoad || state.tl.playing) {
     const playPromise = videoEl.play();
     if (playPromise?.catch) playPromise.catch(() => {});
@@ -2033,7 +2325,8 @@ function syncPhonePlaybackToTimeline({ forceSeek = false, forceReload = false } 
     const currentTime = Number.isFinite(phone.videoEl.currentTime) ? phone.videoEl.currentTime : null;
     const driftSec = currentTime == null ? Number.POSITIVE_INFINITY : Math.abs(currentTime - videoSec);
     const nowMs = performance.now();
-    const shouldCorrectDrift = state.tl.playing
+    const shouldCorrectDrift = isExternalVideoContinuousTimeSyncEnabled()
+      && state.tl.playing
       && driftSec > 0.18
       && nowMs - (phone.lastDriftCorrectAt || 0) > 180;
     if (forceSeek || !state.tl.playing || shouldCorrectDrift) {
@@ -2042,6 +2335,8 @@ function syncPhonePlaybackToTimeline({ forceSeek = false, forceReload = false } 
     }
   }
   try { phone.videoEl.playbackRate = state.tl.playbackRate; } catch {}
+  phone.videoEl.muted = false;
+  try { phone.videoEl.volume = 1; } catch {}
   if (state.tl.playing) {
     if (phone.videoEl.paused) {
       const playPromise = phone.videoEl.play();
@@ -2362,6 +2657,7 @@ async function loadMapData() {
     normalizeMapVideoRanges(state.mapData.videos || []);
     state.cvStatuses = await Pipeline.buildCvStatuses(state.projectId);
     state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
     await autoAssignCsvAthletesFromApiMeta();
     await autoAssignCsvAthletesFromMemory();
     assignVideoColors();
@@ -2388,7 +2684,16 @@ function normalizeAthleteId(id) {
 }
 
 function isPlaybackOnlyVideo(video) {
-  return !!video?.playback_only;
+  if (!video?.playback_only || video?.force_analyze) return false;
+  if (video?.external_playback) return true;
+  const captureStartTs = Number(video?.capture_start_ts);
+  const source = String(video?.capture_ts_source || '').trim().toLowerCase();
+  if (!Number.isFinite(captureStartTs) || !source || source === 'file_last_modified') return false;
+  return (
+    /apple/i.test(String(video?.device_make || '')) ||
+    /iphone|ipad|ipod/i.test(String(video?.device_model || '')) ||
+    /^(IMG|VID|PXL|MVIMG|IMG_E)_\d{3,}/i.test(String(video?.filename || ''))
+  );
 }
 
 function playbackOnlyVideoTitle(video) {
@@ -2479,10 +2784,42 @@ function findAthleteById(athId) {
 }
 
 /**
+ * Cache for segment→overlap / segment→athletes lookups.
+ *
+ * Both `findOverlappingVideos` and `getSegmentAthletes` are pure functions of
+ * (segment, state.mapData.videos, state.fileMeta, state.videoColors, state.athletes).
+ * They are called repeatedly per render and per animation frame for every segment,
+ * which is O(segments × videos) work that grows as segments accumulate. We memoize
+ * by segment id + a generation token that is bumped whenever any input changes.
+ */
+let _segmentLookupGen = 0;
+const _overlapCache = new Map();   // `${gen}|${segId}|${analyzableOnly}` -> result
+const _athletesCache = new Map();  // `${gen}|${segId}` -> result
+
+function invalidateSegmentLookupCache() {
+  _segmentLookupGen++;
+  _overlapCache.clear();
+  _athletesCache.clear();
+}
+
+/**
  * Find all videos that overlap a segment's time range.
  * Returns [{vid, videoStartSec, videoEndSec}] — video-local start/end seconds.
  */
 function findOverlappingVideos(seg, { analyzableOnly = false } = {}) {
+  const segId = seg?.id;
+  if (segId != null) {
+    const key = `${_segmentLookupGen}|${segId}|${analyzableOnly ? 1 : 0}`;
+    const cached = _overlapCache.get(key);
+    if (cached) return cached;
+    const computed = _computeOverlappingVideos(seg, { analyzableOnly });
+    _overlapCache.set(key, computed);
+    return computed;
+  }
+  return _computeOverlappingVideos(seg, { analyzableOnly });
+}
+
+function _computeOverlappingVideos(seg, { analyzableOnly = false } = {}) {
   const MIN_POSE_RANGE_SEC = 0.35;
   if (!state.mapData) return [];
   const vids = state.mapData.videos || [];
@@ -2573,6 +2910,19 @@ function findOverlappingVideos(seg, { analyzableOnly = false } = {}) {
  * Returns [{athleteId, name, color}].
  */
 function getSegmentAthletes(seg) {
+  const segId = seg?.id;
+  if (segId != null) {
+    const key = `${_segmentLookupGen}|${segId}`;
+    const cached = _athletesCache.get(key);
+    if (cached) return cached;
+    const computed = _computeSegmentAthletes(seg);
+    _athletesCache.set(key, computed);
+    return computed;
+  }
+  return _computeSegmentAthletes(seg);
+}
+
+function _computeSegmentAthletes(seg) {
   const overlapping = findOverlappingVideos(seg, { analyzableOnly: true });
   const seen = new Map(); // athleteId -> {name, color}
   for (const { vid } of overlapping) {
@@ -5789,7 +6139,8 @@ async function createSegmentFromManeuver(maneuver) {
     tsEnd: Number(maneuver.end_ts),
   };
   state.segments = [...(state.segments || []), segment].sort((a, b) => Number(a.tsStart || 0) - Number(b.tsStart || 0));
-  await saveSegments();
+  invalidateSegmentLookupCache();
+  if (state.projectId) await DB.putSegment(state.projectId, segment);
   renderSegmentPanel();
   renderAnalysisTab();
   renderMap();
@@ -6572,6 +6923,12 @@ function getKnownSkeletonCoverage(fileId) {
   ];
 }
 
+function isPoseCoverageCompatibleWithCurrentMode(fileId) {
+  const currentMode = getPoseMode();
+  const recordedMode = normalizePoseMode(state.cvStatuses?.[fileId]?.pose_mode || '3d');
+  return recordedMode === currentMode;
+}
+
 function isSkeletonRangeReady(fileId, startSec, endSec, durationSec = null, tolerance = 1.25) {
   const start = Number(startSec) || 0;
   const duration = Number(durationSec);
@@ -6641,7 +6998,32 @@ function isAnalysisViewActive() {
   return !!el('view-analysis')?.classList.contains('active-view');
 }
 
-function updateHeatmapButtonState(seg = (isAnalysisViewActive() ? getSegmentAtTs(state.tl?.currentTs) : null), inAnalysis = isAnalysisViewActive()) {
+function getInlineHeatmapTargetSegment(inAnalysis = isAnalysisViewActive()) {
+  if (!inAnalysis) return null;
+  const hoverId = state.inlineHeatmaps?.hoverSegmentId;
+  const hoverSeg = hoverId != null ? getSegmentById(hoverId) : null;
+  return hoverSeg || getSegmentAtTs(state.tl?.currentTs);
+}
+
+function setInlineHeatmapHoverSegment(segId) {
+  const nextId = segId == null ? null : String(segId);
+  if ((state.inlineHeatmaps?.hoverSegmentId || null) === nextId) return;
+  state.inlineHeatmaps.hoverSegmentId = nextId;
+  const seg = getInlineHeatmapTargetSegment();
+  updateHeatmapButtonState(seg, isAnalysisViewActive());
+  if (state.inlineHeatmaps?.visible) {
+    syncInlineHeatmapsToCurrentSegment(seg, isAnalysisViewActive());
+  }
+}
+
+function clearInlineHeatmapHoverSegment(segId = null) {
+  const current = state.inlineHeatmaps?.hoverSegmentId;
+  if (current == null) return;
+  if (segId != null && String(segId) !== String(current)) return;
+  setInlineHeatmapHoverSegment(null);
+}
+
+function updateHeatmapButtonState(seg = getInlineHeatmapTargetSegment(), inAnalysis = isAnalysisViewActive()) {
   const btn = el('btn-heatmaps');
   if (!btn) return;
   btn.style.display = state.advancedMode ? '' : 'none';
@@ -6649,9 +7031,9 @@ function updateHeatmapButtonState(seg = (isAnalysisViewActive() ? getSegmentAtTs
   btn.disabled = !state.advancedMode || !inAnalysis || (!seg && !state.inlineHeatmaps?.visible);
   btn.title = seg
     ? (state.inlineHeatmaps?.visible
-      ? 'Hide the inline report heatmaps beside the videos'
-      : 'Show the report heatmaps beside each visible video')
-    : 'Move the playhead into a segment to show inline heatmaps';
+      ? 'Hide segment stats beside the map'
+      : 'Show segment stats beside the map')
+    : 'Move the playhead into a segment to show segment stats';
 }
 
 function syncHeatmapViewerToCurrentSegment(seg, inAnalysis = isAnalysisViewActive()) {
@@ -6680,8 +7062,9 @@ function updateCurrentSegmentActions() {
       }
     }
   }
-  updateHeatmapButtonState(seg, inAnalysis);
-  syncHeatmapViewerToCurrentSegment(seg, inAnalysis);
+  const heatmapSeg = getInlineHeatmapTargetSegment(inAnalysis);
+  updateHeatmapButtonState(heatmapSeg, inAnalysis);
+  syncHeatmapViewerToCurrentSegment(heatmapSeg, inAnalysis);
 }
 
 function assignVideoColors() {
@@ -6730,6 +7113,7 @@ function assignVideoColors() {
     const csvAthColor = resolveAthleteColor(csvMeta.athlete_id);
     state.videoColors[csv.id] = csvAthColor || '#2ea043';
   }
+  invalidateSegmentLookupCache();
 }
 
 function initTrackVisibility() {
@@ -6952,6 +7336,7 @@ function updateCurrentWindEstimate(absTs = state.tl?.currentTs, { forceRender = 
     sampleTs: candidates.length ? candidates[0].ts : null,
   } : null;
   renderWindMapControl();
+  refreshTimelineStatsForWindAvailabilityChange();
   if (forceRender || !state.tl?.playing) updateTimelineStats();
   return state.wind.localNow;
 }
@@ -6994,9 +7379,11 @@ async function loadWindEstimates() {
     state.wind._lastLocalEvalTs = NaN;
     renderWindMapControl();
     renderWindMapLayer();
+    refreshTimelineStatsForWindAvailabilityChange();
     if (!projectId || !csvs.length) {
       state.wind.loading = false;
       renderWindMapControl();
+      refreshTimelineStatsForWindAvailabilityChange();
       return;
     }
 
@@ -7058,6 +7445,7 @@ async function loadWindEstimates() {
     updateCurrentWindEstimate(state.tl?.currentTs, { forceRender: true });
     renderWindMapLayer();
     renderWindMapControl();
+    refreshTimelineStatsForWindAvailabilityChange();
     if (projectId === state.projectId) void refreshManeuvers('wind-updated');
   })();
   state.wind.promise = promise;
@@ -7302,6 +7690,7 @@ async function setFileMeta(fileId, meta) {
   await DB.setFileMeta(state.projectId, fileId, meta);
   // Reload full meta dict
   state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
 
   const csvTrack = (state.mapData?.csvs || []).find(c => c.id === fileId);
   if (csvTrack && meta?.athlete_id) {
@@ -7318,14 +7707,24 @@ async function setFileMeta(fileId, meta) {
 async function setCsvAthleteAndLinkedVideos(csvFileId, athleteId) {
   if (!state.projectId || !csvFileId) return;
   const nextAthleteId = athleteId || null;
-  const updates = [];
   const csvMeta = state.fileMeta?.[csvFileId] || {};
-  updates.push([csvFileId, { ...csvMeta, athlete_id: nextAthleteId }]);
+  await DB.setFileMeta(state.projectId, csvFileId, { ...csvMeta, athlete_id: nextAthleteId });
+  state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
 
+  try {
+    await Pipeline.runMatching(state.projectId);
+  } catch (err) {
+    console.warn('[assign] failed to refresh CSV/video matches before linking athletes:', err);
+  }
+  await loadMapData();
+
+  const linkedUpdates = [];
   for (const video of (state.mapData?.videos || [])) {
     if (String(video?.best_match_csv_id || '') !== String(csvFileId)) continue;
     const videoMeta = state.fileMeta?.[video.id] || {};
-    updates.push([
+    if (videoMeta.manual_athlete) continue;
+    linkedUpdates.push([
       video.id,
       {
         ...videoMeta,
@@ -7334,11 +7733,13 @@ async function setCsvAthleteAndLinkedVideos(csvFileId, athleteId) {
       },
     ]);
   }
-
-  for (const [fileId, meta] of updates) {
+  for (const [fileId, meta] of linkedUpdates) {
     await DB.setFileMeta(state.projectId, fileId, meta);
   }
-  state.fileMeta = await DB.getFileMeta(state.projectId);
+  if (linkedUpdates.length) {
+    state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
+  }
 
   const csvTrack = (state.mapData?.csvs || []).find(c => String(c.id) === String(csvFileId));
   if (csvTrack && nextAthleteId) {
@@ -7360,7 +7761,11 @@ async function setVideoExternalMode(fileId, { external = false, athleteId = null
   // Claiming a video for analysis (external=false) sets force_analyze so the
   // pipeline's auto re-flag loop and playback-only heuristic leave it analyzable,
   // even with no matching CSV. Marking it External clears the protection.
-  await DB.updateFileFields(fileId, { playback_only: !!external, force_analyze: !external });
+  await DB.updateFileFields(fileId, {
+    playback_only: !!external,
+    external_playback: !!external,
+    force_analyze: !external,
+  });
 
   if (external) {
     nextMeta.athlete_id = null;
@@ -7437,6 +7842,7 @@ async function autoAssignCsvAthletesFromMemory() {
     await DB.setFileMeta(state.projectId, fileId, meta);
   }
   state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
   updateAthleteLibraryFromCurrentState();
   assignVideoColors();
   return true;
@@ -7491,6 +7897,7 @@ async function autoAssignCsvAthletesFromApiMeta() {
     await DB.setFileMeta(state.projectId, fileId, meta);
   }
   state.fileMeta = await DB.getFileMeta(state.projectId);
+  invalidateSegmentLookupCache();
   updateAthleteLibraryFromCurrentState();
   assignVideoColors();
   return true;
@@ -7716,7 +8123,7 @@ function renderMap() {
     // when it has no GPS of its own (getVideoMapPoints then returns no direct pts,
     // so a phone clip without telemetry stays off the map).
     const hasOwnGps = Array.isArray(v.points) && v.points.length >= 2;
-    if (v.playback_only && !hasOwnGps) continue;
+    if (isPlaybackOnlyVideo(v) && !hasOwnGps) continue;
     const pts = getVideoMapPoints(v, csvs);
     if(!pts.length) continue;
     const color = state.videoColors[v.id] || '#1d8fd8';
@@ -7786,6 +8193,8 @@ function renderMap() {
             tlSeekTo(nearest.ts);
           }
         });
+        poly.on('mouseover', () => setInlineHeatmapHoverSegment(seg.id));
+        poly.on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id));
         poly.addTo(segGroup);
         if(segPts.length > bestLen) { bestLen = segPts.length; bestSegPts = segPts; }
       }
@@ -7795,7 +8204,10 @@ function renderMap() {
         const midPt = bestSegPts[midIdx];
         const labelHtml = `<div class="seg-label-icon" style="color:${segColor};">${seg.name}</div>`;
         const icon = L.divIcon({html:labelHtml, className:'', iconSize:null, iconAnchor:[0,26]});
-        L.marker([midPt.lat, midPt.lon], {icon, pane:'splitMarkersPane'}).addTo(segGroup);
+        L.marker([midPt.lat, midPt.lon], {icon, pane:'splitMarkersPane'})
+          .on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
 
         const startPt = bestSegPts[0];
         const endPt = bestSegPts[bestSegPts.length - 1];
@@ -7806,7 +8218,9 @@ function renderMap() {
           fillColor: '#2ea043',
           fillOpacity: 1,
           pane: 'splitMarkersPane',
-        }).addTo(segGroup);
+        }).on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
         L.circleMarker([endPt.lat, endPt.lon], {
           radius: 7,
           color: '#ffffff',
@@ -7814,7 +8228,9 @@ function renderMap() {
           fillColor: '#e3342f',
           fillOpacity: 1,
           pane: 'splitMarkersPane',
-        }).addTo(segGroup);
+        }).on('mouseover', () => setInlineHeatmapHoverSegment(seg.id))
+          .on('mouseout', () => clearInlineHeatmapHoverSegment(seg.id))
+          .addTo(segGroup);
       }
     }
     segGroup.addTo(state.map);
@@ -7954,7 +8370,7 @@ function syncTimelineSlotOverlayMetricPrefs(slot) {
 }
 
 function getUnifiedTimelineOverlayMetricSet(slots = state.tl?.athleteSlots || []) {
-  const validKeys = new Set(TIMELINE_STAT_DEFS.map(def => def.key));
+  const validKeys = new Set(getVisibleTimelineStatDefs().map(def => def.key));
   const selected = new Set();
   for (const slot of slots) {
     const metricSet = slot?._selectedTimelineMetrics instanceof Set
@@ -7968,7 +8384,7 @@ function getUnifiedTimelineOverlayMetricSet(slots = state.tl?.athleteSlots || []
 }
 
 function applyUnifiedTimelineOverlayMetricSet(metricKeys, slots = state.tl?.athleteSlots || []) {
-  const validKeys = new Set(TIMELINE_STAT_DEFS.map(def => def.key));
+  const validKeys = new Set(getVisibleTimelineStatDefs().map(def => def.key));
   const normalized = new Set();
   for (const key of metricKeys || []) {
     if (validKeys.has(key)) normalized.add(key);
@@ -8005,8 +8421,9 @@ function buildTimeline() {
     return;
   }
 
-  // Gather all timestamps for global range — use VIDEO file ranges only
-  // so the scrub bar shows only the time span covered by video files
+  // Gather all timestamps for global range. Include the full CSV range so
+  // users can scrub and create segments across the entire telemetry session,
+  // even before/after GoPro coverage.
   const allTs = [];
   for(const v of allTimelineVideos) {
     if(v.ts_start != null) allTs.push(v.ts_start);
@@ -8023,10 +8440,7 @@ function buildTimeline() {
     if(c.ts_start != null) csvTs.push(c.ts_start);
     if(c.ts_end != null) csvTs.push(c.ts_end);
   }
-  // Fallback: if no videos have timestamps, use CSV timestamps
-  if(!allTs.length) {
-    allTs.push(...csvTs);
-  }
+  allTs.push(...csvTs);
   if(!allTs.length) {
     tl.athleteSlots = [];
     showNoVideo(true);
@@ -8482,11 +8896,11 @@ function tsFallsInCsvGpsGap(ts, csvPts, gapThreshold = null, alreadySorted = fal
   const prev = pts[lo - 1];
   if (!prev && next) {
     const edgeGap = Number(next.ts) - t;
-    return edgeGap > threshold && edgeGap <= 120;
+    return edgeGap > threshold;
   }
   if (prev && !next) {
     const edgeGap = t - Number(prev.ts);
-    return edgeGap > threshold && edgeGap <= 120;
+    return edgeGap > threshold;
   }
   if (!prev || !next) return false;
   const gap = Number(next.ts) - Number(prev.ts);
@@ -8510,11 +8924,11 @@ function mergeCsvMetricWithVideoGpsGaps(csvMetricPts, csvGpsPts, videoPts, mappe
   const metricSorted = sortedTelemetryPoints(csvMetricPts);
   if (metricSorted.length < 2 && Array.isArray(videoPts) && videoPts.length) {
     const fallbackAll = videoPts.map(mapper).filter(Boolean);
-    return metricSorted.length ? metricSorted : fallbackAll;
+    return sortedTelemetryPoints([...metricSorted, ...fallbackAll]);
   }
   const fallback = collectVideoGapFallbackPoints(metricSorted, videoPts, mapper);
   if (!fallback.length) return csvMetricPts;
-  return [...metricSorted, ...fallback];
+  return sortedTelemetryPoints([...metricSorted, ...fallback]);
 }
 
 function pointMetricValue(point, metricKey) {
@@ -8587,12 +9001,17 @@ function collectSogForAthlete(athId, avids, extraCsvTracks = []) {
       }
     }
   }
-  if (csvPts.length) return finalizeSogPoints(csvPts);
-  if (videoPts.length) return finalizeSogPoints(videoPts);
-
-  const derived = [];
-  for (const v of avids) derived.push(...buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
-  return finalizeSogPoints(derived);
+  const videoSogPts = videoPts.length ? videoPts : [];
+  if (!videoSogPts.length) {
+    for (const v of avids) videoSogPts.push(...buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
+  }
+  if (csvPts.length) {
+    return finalizeSogPoints(mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoSogPts, p => {
+      const sog = Number(p?.sog);
+      return Number.isFinite(sog) && p?.ts != null ? { ts: Number(p.ts), sog, source: 'gopro_gap' } : null;
+    }));
+  }
+  return finalizeSogPoints(videoSogPts);
 }
 
 function collectSogForVideo(v) {
@@ -8614,9 +9033,14 @@ function collectSogForVideo(v) {
   for (const p of getTrackTelemetryPoints(v)) {
     if (p.ts != null && p.sog != null) videoPts.push({ ts: p.ts, sog: p.sog });
   }
-  if (csvPts.length) return finalizeSogPoints(csvPts);
-  if (videoPts.length) return finalizeSogPoints(videoPts);
-  return finalizeSogPoints(buildDerivedSogFromGps(getTrackTelemetryPoints(v)));
+  const videoSogPts = videoPts.length ? videoPts : buildDerivedSogFromGps(getTrackTelemetryPoints(v));
+  if (csvPts.length) {
+    return finalizeSogPoints(mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoSogPts, p => {
+      const sog = Number(p?.sog);
+      return Number.isFinite(sog) && p?.ts != null ? { ts: Number(p.ts), sog, source: 'gopro_gap' } : null;
+    }));
+  }
+  return finalizeSogPoints(videoSogPts);
 }
 
 function collectSogForCsvTracks(csvTracks) {
@@ -8662,7 +9086,7 @@ function collectTrackMetricForAthlete(avids, metricKey, extraCsvTracks = []) {
     }
   }
 
-  if (csvPts.length && (metricKey === 'cog' || metricKey === 'hdg')) {
+  if (csvPts.length) {
     return mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoPts, p => {
       const value = pointMetricValue(p, metricKey);
       return value != null ? { ts: Number(p.ts), [metricKey]: value, source: 'gopro_gap' } : null;
@@ -8710,7 +9134,7 @@ function collectTrackMetricForVideo(video, metricKey) {
     }
   }
 
-  if (csvPts.length && (metricKey === 'cog' || metricKey === 'hdg')) {
+  if (csvPts.length) {
     return mergeCsvMetricWithVideoGpsGaps(csvPts, csvGpsPts, videoPts, p => {
       const value = pointMetricValue(p, metricKey);
       return value != null ? { ts: Number(p.ts), [metricKey]: value, source: 'gopro_gap' } : null;
@@ -9225,7 +9649,7 @@ function computeSeriesInstantValue(series, centerTs, maxGapSec = TIMELINE_INSTAN
 }
 
 // Mean of the trailing `windowSec` seconds ending at `centerTs` — used for the
-// 1 Hz timeline stat readouts so the numbers reflect the last second rather than
+// 3 Hz timeline stat readouts so the numbers reflect the last second rather than
 // a single instantaneous (and jumpy) sample. Falls back to the nearest sample
 // when the window has no coverage (e.g. at the very start of a track).
 function computeSeriesTrailingMean(series, centerTs, windowSec = TIMELINE_STATS_MEAN_WINDOW_SEC) {
@@ -9422,7 +9846,7 @@ function buildTimelineOverlayGraphData(selectedMetrics, slots, currentTs, window
   const endTs = ts + spanSec / 2;
   const metrics = {};
 
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     if (!selectedMetrics.has(def.key)) continue;
 
     const seriesList = [];
@@ -9671,7 +10095,7 @@ function renderTimelineMetricSharedPanel(selected, slots) {
   panel.appendChild(head);
 
   let visibleCount = 0;
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const metricData = graphData.metrics?.[def.key];
     if (!selected.has(def.key) || !metricData) continue;
     const graph = document.createElement('div');
@@ -9738,7 +10162,7 @@ function updateSlotMetricOverlay(slot) {
     if (layout?.gap != null) wrap.style.gap = `${layout.gap}px`;
     else wrap.style.gap = '';
     let visibleCount = 0;
-    for (const def of TIMELINE_STAT_DEFS) {
+    for (const def of getVisibleTimelineStatDefs()) {
       const metricData = graphData?.metrics?.[def.key];
       const item = slot._metricOverlayGraphs[def.key];
       if (!selected.has(def.key) || !metricData || (allowed && !allowed.has(def.key))) {
@@ -9772,7 +10196,7 @@ function updateSlotMetricOverlay(slot) {
   }
 
   let visibleCount = 0;
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const item = slot._metricOverlayItems[def.key];
     if (!selected.has(def.key)) {
       if (item?.root) item.root.style.display = 'none';
@@ -9855,7 +10279,7 @@ function populateTimelineStats() {
     };
   }
 
-  for (const def of TIMELINE_STAT_DEFS) {
+  for (const def of getVisibleTimelineStatDefs()) {
     const group = document.createElement('div');
     group.className = 'tl-stat-group';
 
@@ -9970,7 +10394,7 @@ function updateTimelineStats(force = false) {
     statValues.vmg = computeLiveTimelineVmg(slot, currentTs, statValues.sog, statValues.twa);
     slot._timelineStatValues = statValues;
 
-    for (const def of TIMELINE_STAT_DEFS) {
+    for (const def of getVisibleTimelineStatDefs()) {
       const metricRef = refs.metrics?.[def.key];
       if (!metricRef) continue;
       const hasSeries = slotHasTimelineMetricSeries(slot, def.key);
@@ -10849,9 +11273,12 @@ function videoSec2AbsTs(vid, videoSec) {
  */
 function findLatLonForTs(ts) {
   if(!state.mapData) return null;
-  const vids = state.mapData.videos || [];
-  for(const v of vids) {
-    const pts = validLatLonPoints(getTrackTelemetryPoints(v));
+  const tracks = [
+    ...(state.mapData.csvs || []),
+    ...(state.mapData.videos || []),
+  ];
+  for(const track of tracks) {
+    const pts = validLatLonPoints(getTrackTelemetryPoints(track));
     if(!pts.length) continue;
     let bestIdx = 0;
     for(let i = 0; i < pts.length; i++) {
@@ -10872,7 +11299,7 @@ function tlPlay() {
   tl.playing = true;
   tl.lastFrameTime = performance.now();
   tl._lastUiRefreshAt = 0;       // force a UI refresh on the first played frame
-  tl._lastStatsUiUpdateAt = 0;   // and a 1 Hz stats refresh right away
+  tl._lastStatsUiUpdateAt = 0;   // and a 3 Hz stats refresh right away
   tl._pendingProcessedMetricRefresh = true;
   _timelineMetricLoadToken++;
   prewarmLikelyVideosAtTs(tl.currentTs);
@@ -11112,7 +11539,8 @@ function initSogScrub() {
     const xFrac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const pivot = vStart + xFrac * vDur; // time at cursor
 
-    const zoomFactor = e.deltaY > 0 ? 1.25 : 0.8; // scroll down = zoom out, up = zoom in
+    const rawZoomFactor = Math.pow(1.0015, e.deltaY || 0);
+    const zoomFactor = Math.max(0.88, Math.min(1.14, rawZoomFactor)); // scroll down = zoom out, up = zoom in
     let newDur = vDur * zoomFactor;
     // Clamp: min 10 seconds, max = full range
     newDur = Math.max(10, Math.min(globalDur, newDur));
@@ -12113,6 +12541,12 @@ function getPoseInputMaxDim() {
   if (value >= 640) return 640;
   return 480;
 }
+function getPoseMode() {
+  return normalizePoseMode(el('pose-mode-select')?.value || state.poseMode);
+}
+function getPoseMinConfidence() {
+  return normalizePoseMinConfidence(el('pose-2d-threshold-input')?.value ?? state.poseMinConfidence);
+}
 function isPoseExactSegmentSeekEnabled() {
   return !!state.poseExactSegmentSeek;
 }
@@ -12130,6 +12564,16 @@ function areBoomPredictionsEnabled() {
 }
 function areRudderPredictionsEnabled() {
   return state.advancedFeatures?.rudderPredictions !== false;
+}
+function getPoseProcessingOptions() {
+  return {
+    poseMode: getPoseMode(),
+    poseMinConfidence: getPoseMinConfidence(),
+    poseInputMaxDim: getPoseInputMaxDim(),
+    exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
+    enableBoomPrediction: areBoomPredictionsEnabled(),
+    enableRudderPrediction: areRudderPredictionsEnabled(),
+  };
 }
 function isRealtimePoseEnabled() { return false; }
 
@@ -12240,6 +12684,7 @@ function normalizeSegmentRunOpts(segmentOpts = {}) {
     endSec,
     segmentName: segmentName || null,
     fps,
+    forceReplaceRange: segmentOpts?.forceReplaceRange === true,
   };
 }
 
@@ -12381,6 +12826,7 @@ async function runSkeletonForVideo(fileId, segmentOpts = {}) {
         endSec: normalizedSegmentOpts.endSec,
         segmentName: segName || undefined,
         fps: normalizedSegmentOpts.fps ?? undefined,
+        forceReplaceRange: normalizedSegmentOpts.forceReplaceRange || undefined,
       });
       _queuedSegmentRuns.set(fileId, q);
       console.log(`[Pose] queued segment processing for ${fileId} (queue=${q.length})`);
@@ -12414,12 +12860,10 @@ async function runSkeletonForVideo(fileId, segmentOpts = {}) {
     const opts = {
       fps,
       model,
-      poseInputMaxDim: getPoseInputMaxDim(),
-      exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
-      enableBoomPrediction: areBoomPredictionsEnabled(),
-      enableRudderPrediction: areRudderPredictionsEnabled(),
+      ...getPoseProcessingOptions(),
       ...getPoseAthleteOptionsForVideo(fileRec),
     };
+    if (normalizedSegmentOpts.forceReplaceRange) opts.forceReplaceRange = true;
     // If segment bounds provided (video-local seconds), limit processing
     if (normalizedSegmentOpts.startSec != null) opts.startSec = normalizedSegmentOpts.startSec;
     if (normalizedSegmentOpts.endSec != null) opts.endSec = normalizedSegmentOpts.endSec;
@@ -12507,7 +12951,8 @@ async function runSkeletonForAllVideos() {
           const key = `${vid.id}:${videoStartSec.toFixed(1)}:${(videoEndSec ?? 'end')}`;
           if (dedupe.has(key)) continue;
           dedupe.add(key);
-          if (isSkeletonRangeReady(vid.id, videoStartSec, videoEndSec, vid.duration_sec)) {
+          const modeCompatible = isPoseCoverageCompatibleWithCurrentMode(vid.id);
+          if (modeCompatible && isSkeletonRangeReady(vid.id, videoStartSec, videoEndSec, vid.duration_sec)) {
             skipped++;
             continue;
           }
@@ -12517,6 +12962,7 @@ async function runSkeletonForAllVideos() {
             startSec: videoStartSec,
             endSec: videoEndSec,
             segName: seg.name,
+            forceReplaceRange: !modeCompatible,
           });
         }
       }
@@ -12547,7 +12993,12 @@ async function runSkeletonForAllVideos() {
         const badge = el('badge');
         if (badge) badge.textContent = `${done + 1}/${totalJobs}: ${job.filename} (${job.segName})`;
         try {
-          await runSkeletonForVideo(job.fileId, { startSec: job.startSec, endSec: job.endSec, segmentName: job.segName });
+          await runSkeletonForVideo(job.fileId, {
+            startSec: job.startSec,
+            endSec: job.endSec,
+            segmentName: job.segName,
+            forceReplaceRange: job.forceReplaceRange,
+          });
           done++;
         } catch (e) {
           console.warn(`Skeleton failed for ${job.filename} in ${job.segName}:`, e);
@@ -12563,8 +13014,11 @@ async function runSkeletonForAllVideos() {
     } else {
       // No segments: process all videos at full length (fallback)
       const files = await DB.listFiles(state.projectId);
-      const allVideos = files.filter(f => f.kind === 'video' && !f.playback_only);
-      const videos = allVideos.filter(v => !isSkeletonRangeReady(v.id, 0, v.duration_sec, v.duration_sec));
+      const allVideos = files.filter(f => f.kind === 'video' && !isPlaybackOnlyVideo(f));
+      const videos = allVideos.filter(v => (
+        !isPoseCoverageCompatibleWithCurrentMode(v.id)
+        || !isSkeletonRangeReady(v.id, 0, v.duration_sec, v.duration_sec)
+      ));
       const skipped = allVideos.length - videos.length;
       if (allVideos.length === 0) { alert('No analyzable video files in project.'); return; }
       if (videos.length === 0) {
@@ -12587,10 +13041,7 @@ async function runSkeletonForAllVideos() {
           }, {
             fps,
             model,
-            poseInputMaxDim: getPoseInputMaxDim(),
-            exactSegmentSeek: isPoseExactSegmentSeekEnabled(),
-            enableBoomPrediction: areBoomPredictionsEnabled(),
-            enableRudderPrediction: areRudderPredictionsEnabled(),
+            ...getPoseProcessingOptions(),
             ...getPoseAthleteOptionsForVideo(v),
           });
           // Kick queue render again after starting the async job so polling always arms.
@@ -12644,7 +13095,7 @@ async function reprocessSegment(seg) {
   for (const { vid, videoStartSec, videoEndSec } of overlapping) {
     console.log(`[Segment] processing ${vid.filename}: video_s ${videoStartSec.toFixed(1)} - ${videoEndSec?.toFixed(1) ?? 'end'}`);
     jobs.push(
-      runSkeletonForVideo(vid.id, { startSec: videoStartSec, endSec: videoEndSec, segmentName: seg.name })
+      runSkeletonForVideo(vid.id, { startSec: videoStartSec, endSec: videoEndSec, segmentName: seg.name, forceReplaceRange: true })
         .catch(e => {
           console.warn(`Skeleton failed for ${vid.filename} in segment "${seg.name}":`, e);
           throw e;
@@ -12657,7 +13108,12 @@ async function reprocessSegment(seg) {
 
   const results = await Promise.allSettled(jobs);
   state.cvStatuses = await Pipeline.buildCvStatuses(state.projectId);
-  await loadAllSkeletonCoverages();
+  // Only the videos we just processed changed — refresh their coverage instead of
+  // re-parsing every video's (ever-growing) skeleton.jsonl after each segment.
+  await Promise.all(overlapping.map(({ vid, videoStartSec, videoEndSec }) =>
+    refreshSkeletonCoverageForVideo(vid.id, { startSec: videoStartSec, endSec: videoEndSec })
+      .catch(() => {})
+  ));
   renderQueue();
   renderSegmentPanel();
   renderAnalysisTab();
@@ -12676,6 +13132,7 @@ async function loadSegments() {
   if(!state.projectId) { state.segments = []; return; }
   try { state.segments = await DB.getSegments(state.projectId); }
   catch(e) { state.segments = []; }
+  invalidateSegmentLookupCache();
 }
 
 async function saveSegments() {
@@ -12797,11 +13254,20 @@ function drawSegmentSelectHighlight() {
   const ss = state.segmentSelect;
   if(ss.highlightLayer && state.map) { state.map.removeLayer(ss.highlightLayer); ss.highlightLayer = null; }
   if(ss.tsStart == null || ss.tsEnd == null || !state.mapData) return;
-  const vids = state.mapData.videos || [];
+  const tracks = [
+    ...(state.mapData.csvs || []),
+    ...(state.mapData.videos || []),
+  ];
   const lg = L.layerGroup();
-  for(const v of vids) {
-    const color = state.videoColors[v.id] || '#f5a623';
-    const pts = (v.points || []).filter(p => p.ts != null && p.ts >= ss.tsStart && p.ts <= ss.tsEnd);
+  for(const track of tracks) {
+    const color = state.videoColors[track.id] || '#f5a623';
+    const pts = getTrackTelemetryPoints(track).filter(p => (
+      p.ts != null &&
+      p.ts >= ss.tsStart &&
+      p.ts <= ss.tsEnd &&
+      Number.isFinite(Number(p.lat)) &&
+      Number.isFinite(Number(p.lon))
+    ));
     if(pts.length >= 2) {
       L.polyline(pts.map(p=>[p.lat,p.lon]), {color, weight:10, opacity:0.85}).addTo(lg);
     }
@@ -12850,7 +13316,8 @@ async function renameSegment(segId, nextName) {
   const name = String(nextName || '').trim();
   if (!seg || !name || name === seg.name) return;
   seg.name = name;
-  await saveSegments();
+  invalidateSegmentLookupCache();
+  if (state.projectId) await DB.putSegment(state.projectId, seg);
   renderMap();
   renderSegmentPanel();
   renderAnalysisTab();
@@ -12878,15 +13345,20 @@ async function saveNewSegment() {
     tsEnd: ss.tsEnd,
   };
   state.segments.push(seg);
+  invalidateSegmentLookupCache();
   state.analysisSelected = [...new Set([...(state.analysisSelected || []), seg.id])];
   saveAnalysisSelection();
-  await saveSegments();
+  if (state.projectId) await DB.putSegment(state.projectId, seg);
   cancelSegmentCreation();
 
-  // Auto-start processing pipeline for ALL overlapping videos in the segment
-  try {
-    reprocessSegment(seg);
-  } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+  // Auto-start processing only when analyzable GoPro videos overlap. CSV/external-only
+  // segments are still valid and should not raise a "no analyzable videos" alert.
+  const analyzableOverlap = findOverlappingVideos(seg, { analyzableOnly: true });
+  if (analyzableOverlap.length) {
+    try {
+      reprocessSegment(seg);
+    } catch(e) { console.warn('Auto-process after segment creation failed:', e); }
+  }
 
   renderMap();
   renderSegmentPanel();
@@ -12899,10 +13371,11 @@ async function deleteSegment(segId) {
   const seg = getSegmentById(segId);
   const overlapping = seg ? findOverlappingVideos(seg, { analyzableOnly: true }) : [];
   state.segments = state.segments.filter(s => s.id !== segId);
+  invalidateSegmentLookupCache();
   const segKey = String(segId);
   state.analysisSelected = (state.analysisSelected || []).map(String).filter(id => id !== segKey);
   saveAnalysisSelection();
-  await saveSegments();
+  if (state.projectId) await DB.deleteSegmentRow(state.projectId, segId);
   for (const { vid, videoStartSec, videoEndSec } of overlapping) {
     try {
       const duration = Number(vid?.duration_sec);
@@ -12944,6 +13417,8 @@ function renderSegmentPanel() {
       if(seg.tsStart != null) tlSeekTo(seg.tsStart);
     };
     row.onclick = seekToSegment;
+    row.addEventListener('mouseenter', () => setInlineHeatmapHoverSegment(seg.id));
+    row.addEventListener('mouseleave', () => clearInlineHeatmapHoverSegment(seg.id));
     const nameEl = document.createElement('span');
     nameEl.className = 'seg-name';
     nameEl.textContent = seg.name;
@@ -13045,6 +13520,8 @@ function renderAnalysisTab() {
     const status = statusById.get(String(s.id)) || { key: 'unprocessed', label: 'Unprocessed', detail: 'Not processed', ready: false };
     const row = document.createElement('div');
     row.className = 'an-split';
+    row.addEventListener('mouseenter', () => setInlineHeatmapHoverSegment(s.id));
+    row.addEventListener('mouseleave', () => clearInlineHeatmapHoverSegment(s.id));
     const include = document.createElement('input');
     include.type = 'checkbox';
     include.className = 'an-split-include';
@@ -13471,6 +13948,7 @@ function initStlResize() {
   const handle = el('stl-resize-handle');
   if(!handle) return;
   const left = el('panel-left');
+  const mapWorkspace = el('map-workspace');
   let dragging = false;
   handle.addEventListener('pointerdown', e => {
     dragging = true;
@@ -13478,13 +13956,13 @@ function initStlResize() {
     handle.classList.add('dragging');
   });
   handle.addEventListener('pointermove', e => {
-    if(!dragging) return;
+    if(!dragging || !left || !mapWorkspace) return;
     const rect = left.getBoundingClientRect();
     const controlsH = el('map-controls').getBoundingClientRect().height;
     const total = rect.height - controlsH - handle.offsetHeight;
     const mapH = Math.max(80, Math.min(total - 80, e.clientY - rect.top));
     const stlH = total - mapH;
-    el('map').style.flex = `0 0 ${mapH}px`;
+    mapWorkspace.style.flex = `0 0 ${mapH}px`;
     el('stl-inline').style.flex = `0 0 ${stlH}px`;
     if(state.map) state.map.invalidateSize();
     window.dispatchEvent(new Event('resize'));
@@ -13517,7 +13995,7 @@ function initDivider() {
     dragging = true;
     activePointerId = e.pointerId;
     startX = e.clientX;
-    startW = left.offsetWidth;
+    startW = layout.classList.contains('map-col-minimized') ? 0 : left.offsetWidth;
     div.classList.add('dragging');
     div.setPointerCapture(e.pointerId);
     document.body.style.userSelect = 'none';
@@ -13526,35 +14004,80 @@ function initDivider() {
 
   div.addEventListener('pointermove', e => {
     if(!dragging || e.pointerId !== activePointerId) return;
-    const minW = layout.classList.contains('phone-playback-active') ? PHONE_PLAYBACK_LEFT_MIN_WIDTH : 200;
     const outerDividerW = div.offsetWidth || 0;
-    const rightMinW = layout.classList.contains('phone-playback-active') ? getPhonePlaybackRightMinWidth() : 200;
-    const maxW = Math.max(minW, layout.offsetWidth - outerDividerW - rightMinW);
-    const w = Math.max(minW, Math.min(startW + (e.clientX - startX), maxW));
+    const maxW = Math.max(0, layout.offsetWidth - outerDividerW);
+    const rawW = Math.max(0, Math.min(startW + (e.clientX - startX), maxW));
+    const collapseMap = rawW <= ANALYSIS_COLUMN_COLLAPSE_PX;
+    const collapseVideo = rawW >= maxW - ANALYSIS_COLUMN_COLLAPSE_PX;
+    const w = collapseMap ? 0 : (collapseVideo ? maxW : rawW);
+
+    const nextColumns = normalizeAnalysisColumns(state.analysisColumns);
+    nextColumns.mapMinimized = collapseMap;
+    nextColumns.videoMinimized = collapseVideo;
+    if (
+      nextColumns.mapMinimized !== state.analysisColumns.mapMinimized ||
+      nextColumns.videoMinimized !== state.analysisColumns.videoMinimized
+    ) {
+      state.analysisColumns = nextColumns;
+      saveAnalysisColumnsSetting();
+      applyAnalysisColumnsState();
+    }
     left.style.width = w + 'px';
     left.style.flex = 'none';
     if (layout.classList.contains('phone-playback-active')) {
       state.phonePlayback.savedActiveLeftWidthPx = w;
-      const shell = el('phone-playback-shell');
-      const panelRight = el('panel-right');
-      const playbackDivider = el('phone-playback-divider');
-      const lockedGridW = Number(state.phonePlayback?.savedVideoGridWidthPx);
-      if (shell && panelRight && Number.isFinite(lockedGridW)) {
-        const dividerW = playbackDivider?.offsetWidth || 0;
-        const totalW = panelRight.clientWidth - dividerW;
-        const minShellW = 180;
-        const maxShellW = Math.max(minShellW, totalW - 240);
-        const clampedGridW = Math.max(240, Math.min(lockedGridW, totalW - minShellW));
-        if (clampedGridW !== lockedGridW) setPhonePlaybackGridWidth(clampedGridW);
-        const nextShellW = Math.max(minShellW, Math.min(totalW - clampedGridW, maxShellW));
-        state.phonePlayback.savedShellWidthPx = nextShellW;
-        shell.style.width = `${nextShellW}px`;
-        shell.style.flex = `0 0 ${nextShellW}px`;
-      }
+      // Hold the GoPro/phone shell at its saved width and let the external
+      // video grid flex to fill the rest of the new total width.
+      syncPhonePlaybackShellSize();
     }
     if(state.map) state.map.invalidateSize();
     // Keep STL canvas sizing in sync while dragging divider.
     window.dispatchEvent(new Event('resize'));
+  });
+
+  div.addEventListener('pointerup', endDrag);
+  div.addEventListener('pointercancel', endDrag);
+  div.addEventListener('lostpointercapture', endDrag);
+}
+
+function initInlineHeatmapDivider() {
+  const div = el('inline-heatmap-divider');
+  const panel = el('inline-heatmap-panel');
+  if (!div || !panel) return;
+
+  let dragging = false;
+  let activePointerId = null;
+  let startX = 0;
+  let startW = 0;
+
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    activePointerId = null;
+    div.classList.remove('dragging');
+    document.body.style.userSelect = '';
+    if (Number.isFinite(state.inlineHeatmaps?.widthPx)) {
+      applyInlineHeatmapPanelWidth(state.inlineHeatmaps.widthPx, true);
+    }
+  };
+
+  div.addEventListener('pointerdown', e => {
+    if (e.button !== undefined && e.button !== 0) return;
+    dragging = true;
+    activePointerId = e.pointerId;
+    startX = e.clientX;
+    startW = panel.offsetWidth || state.inlineHeatmaps?.widthPx || INLINE_HEATMAP_PANEL_MIN_WIDTH;
+    div.classList.add('dragging');
+    div.setPointerCapture(e.pointerId);
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  div.addEventListener('pointermove', e => {
+    if (!dragging || e.pointerId !== activePointerId) return;
+    applyInlineHeatmapPanelWidth(startW - (e.clientX - startX), false);
+    scheduleAnalysisMapResize();
+    e.preventDefault();
   });
 
   div.addEventListener('pointerup', endDrag);
@@ -13600,14 +14123,22 @@ function initPhonePlaybackDivider() {
 
   div.addEventListener('pointermove', e => {
     if (!dragging || e.pointerId !== activePointerId) return;
-    const dividerW = div.offsetWidth || 0;
-    const totalW = panelRight.clientWidth - dividerW;
-    const minW = 180;
-    const maxW = Math.max(minW, totalW - 240);
-    const nextW = Math.max(minW, Math.min(startW + (e.clientX - startX), maxW));
+    const totalW = Math.round((shell.getBoundingClientRect().width || 0) + (panelRight.getBoundingClientRect().width || 0));
+    const rawW = Math.max(0, Math.min(startW + (e.clientX - startX), totalW));
+    const collapsePhone = rawW <= ANALYSIS_COLUMN_COLLAPSE_PX;
+    const collapseVideo = rawW >= totalW - ANALYSIS_COLUMN_COLLAPSE_PX;
+    const nextW = collapsePhone ? 0 : (collapseVideo ? totalW : rawW);
+    const nextColumns = normalizeAnalysisColumns(state.analysisColumns);
+    nextColumns.videoMinimized = collapseVideo;
+    if (nextColumns.videoMinimized !== state.analysisColumns.videoMinimized) {
+      state.analysisColumns = nextColumns;
+      saveAnalysisColumnsSetting();
+      applyAnalysisColumnsState();
+    }
     state.phonePlayback.savedShellWidthPx = nextW;
     shell.style.width = `${nextW}px`;
     shell.style.flex = `0 0 ${nextW}px`;
+    shell.style.padding = collapsePhone ? '0' : '';
     setPhonePlaybackGridWidth(totalW - nextW);
     syncPhonePlaybackMapOffset();
     window.dispatchEvent(new Event('resize'));
@@ -13846,6 +14377,7 @@ function setVideoSlotHidden(slot, hidden) {
 function showAllVideoSlots() {
   state.hiddenVideoSlots = {};
   saveHiddenVideoSlots();
+  showAllAnalysisColumns();
   applyVideoSlotVisibility();
   if (Number.isFinite(Number(state.tl?.currentTs))) tlSeekTo(state.tl.currentTs);
   drawSogCanvas();
@@ -13874,6 +14406,60 @@ function setTemporaryVideoLayout(value) {
   applyVideoLayout();
   syncVideoLayoutButton();
   renderVideoLayoutPopover();
+}
+
+function normalizeAnalysisColumns(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  return {
+    mapMinimized: !!input.mapMinimized,
+    videoMinimized: !!input.videoMinimized,
+  };
+}
+
+function saveAnalysisColumnsSetting() {
+  saveJsonLocal(ANALYSIS_COLUMNS_KEY, normalizeAnalysisColumns(state.analysisColumns));
+}
+
+function applyAnalysisColumnsState() {
+  state.analysisColumns = normalizeAnalysisColumns(state.analysisColumns);
+  const layout = el('layout');
+  if (!layout) return;
+  layout.classList.toggle('map-col-minimized', !!state.analysisColumns.mapMinimized);
+  layout.classList.toggle('video-col-minimized', !!state.analysisColumns.videoMinimized);
+  const left = el('panel-left');
+  if (left && !state.analysisColumns.mapMinimized) {
+    if (state.analysisColumns.videoMinimized && !layout.classList.contains('phone-playback-active')) {
+      left.style.width = '';
+      left.style.flex = '1 1 auto';
+    } else if (left.style.flex === '1 1 auto') {
+      left.style.width = '';
+      left.style.flex = '';
+    }
+  }
+  syncPhonePlaybackShellSize();
+  syncInlineHeatmapPanelLayout();
+  scheduleAnalysisMapResize();
+  applyVideoPaneGridPositions();
+}
+
+function loadAnalysisColumnsSetting() {
+  state.analysisColumns = normalizeAnalysisColumns(loadJsonLocal(ANALYSIS_COLUMNS_KEY, {}));
+  applyAnalysisColumnsState();
+}
+
+function setAnalysisColumnMinimized(column, minimized, { persist = true } = {}) {
+  const next = normalizeAnalysisColumns(state.analysisColumns);
+  if (column === 'map') next.mapMinimized = !!minimized;
+  if (column === 'video') next.videoMinimized = !!minimized;
+  state.analysisColumns = next;
+  if (persist) saveAnalysisColumnsSetting();
+  applyAnalysisColumnsState();
+}
+
+function showAllAnalysisColumns() {
+  state.analysisColumns = { mapMinimized: false, videoMinimized: false };
+  saveAnalysisColumnsSetting();
+  applyAnalysisColumnsState();
 }
 
 function getVisibleTimelineVideoPaneCount() {
@@ -13956,8 +14542,9 @@ function syncVideoLayoutButton() {
   if (btn) btn.textContent = getVideoLayoutLabel();
   const wrap = el('video-layout-wrap');
   const hasMultipleSlots = (state.tl?.athleteSlots || []).length > 1;
-  if (wrap) wrap.style.display = hasMultipleSlots ? '' : 'none';
-  if (!hasMultipleSlots) closeVideoLayoutPopover();
+  const visible = !!state.videoLayoutButtonVisible && hasMultipleSlots;
+  if (wrap) wrap.style.display = visible ? '' : 'none';
+  if (!visible) closeVideoLayoutPopover();
   document.querySelectorAll('.layout-choice').forEach(choice => {
     choice.classList.toggle('active', normalizeVideoLayout(choice.dataset.layout) === normalizeVideoLayout(state.videoLayout));
   });
@@ -14248,10 +14835,20 @@ function applyAdvancedModeVisibility() {
   if (featureBoomPredictionsToggle) featureBoomPredictionsToggle.checked = areBoomPredictionsEnabled();
   const featureRudderPredictionsToggle = el('feature-rudder-predictions-toggle');
   if (featureRudderPredictionsToggle) featureRudderPredictionsToggle.checked = areRudderPredictionsEnabled();
+  const videoLayoutVisibleToggle = el('video-layout-button-visible-toggle');
+  if (videoLayoutVisibleToggle) videoLayoutVisibleToggle.checked = !!state.videoLayoutButtonVisible;
+  const poseModeSelect = el('pose-mode-select');
+  if (poseModeSelect) poseModeSelect.value = getPoseMode();
+  const poseMinConfidenceInput = el('pose-2d-threshold-input');
+  if (poseMinConfidenceInput) poseMinConfidenceInput.value = String(getPoseMinConfidence());
   const poseInputSizeSelect = el('pose-input-size-select');
   if (poseInputSizeSelect) poseInputSizeSelect.value = String(getPoseInputMaxDim());
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.checked = isPoseExactSegmentSeekEnabled();
+  const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
+  if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.checked = isExternalVideoContinuousTimeSyncEnabled();
+  syncTimelineStatVisibilityInputs();
+  syncInlineHeatmapMenuVisibilityInputs();
   const settingsWrap = el('ath-settings-wrap');
   if (settingsWrap) settingsWrap.classList.toggle('open', advanced);
 
@@ -14740,7 +15337,7 @@ async function registerServiceWorker() {
   }
   try {
     const registration = await navigator.serviceWorker.register(
-      new URL('./sw.js?v=20260527detail1', import.meta.url).toString(),
+      new URL('./sw.js?v=20260615edgecolumns1', import.meta.url).toString(),
       { updateViaCache: 'none' },
     );
     registration.update().catch(() => {});
@@ -14753,6 +15350,7 @@ async function init() {
   registerServiceWorker();
   initMap();
   initDivider();
+  initInlineHeatmapDivider();
   initPhonePlaybackDivider();
   initNavigation();
   initKeyboard();
@@ -14764,11 +15362,17 @@ async function init() {
   loadAdvancedModeSetting();
   loadAdvancedFeaturesSetting();
   loadVideoLayoutSetting();
+  loadVideoLayoutButtonVisibilitySetting();
+  loadAnalysisColumnsSetting();
   loadReportOptionsSetting();
   loadTimelineStatsWindowSetting();
   loadTimelineStatOverlayGraphSetting();
   loadTimelineSogGapStitchingSetting();
+  loadExternalVideoContinuousTimeSyncSetting();
+  loadTimelineStatVisibilitySetting();
   loadPoseProcessingSettings();
+  loadInlineHeatmapMenuVisibilitySetting();
+  loadInlineHeatmapPanelWidthSetting();
   loadApiCsvConfig();
 
   await loadProjects();
@@ -14838,16 +15442,36 @@ async function init() {
   // Workers
   const workersIn = el('workers-input');
   if(workersIn) workersIn.addEventListener('change',e=>{ state.mediapipeWorkers=parseInt(e.target.value)||2; });
+  const poseModeSelect = el('pose-mode-select');
+  if (poseModeSelect) poseModeSelect.addEventListener('change', e => setPoseMode(e.target.value));
+  const poseMinConfidenceInput = el('pose-2d-threshold-input');
+  if (poseMinConfidenceInput) poseMinConfidenceInput.addEventListener('change', e => setPoseMinConfidence(e.target.value));
   const poseInputSizeSelect = el('pose-input-size-select');
   if (poseInputSizeSelect) poseInputSizeSelect.addEventListener('change', e => setPoseInputMaxDim(e.target.value));
   const poseExactSegmentSeekToggle = el('pose-exact-segment-seek-toggle');
   if (poseExactSegmentSeekToggle) poseExactSegmentSeekToggle.addEventListener('change', e => setPoseExactSegmentSeek(e.target.checked));
+  document.querySelectorAll('[data-inline-heatmap-toggle]').forEach(input => {
+    input.addEventListener('change', e => setInlineHeatmapMenuItemVisible(
+      e.target.getAttribute('data-inline-heatmap-toggle'),
+      e.target.checked,
+    ));
+  });
   const tlStatsWindowIn = el('tl-stats-window-input');
   if (tlStatsWindowIn) tlStatsWindowIn.addEventListener('change', e => setTimelineStatsWindowSec(e.target.value));
   const tlStatOverlayToggle = el('tl-stats-overlay-graph-toggle');
   if (tlStatOverlayToggle) tlStatOverlayToggle.addEventListener('change', e => setTimelineStatOverlayGraph(e.target.checked));
   const tlSogGapStitchingToggle = el('tl-sog-gap-stitching-toggle');
   if (tlSogGapStitchingToggle) tlSogGapStitchingToggle.addEventListener('change', e => setTimelineSogGapStitching(e.target.checked));
+  const externalVideoContinuousSyncToggle = el('external-video-continuous-sync-toggle');
+  if (externalVideoContinuousSyncToggle) externalVideoContinuousSyncToggle.addEventListener('change', e => setExternalVideoContinuousTimeSync(e.target.checked));
+  const videoLayoutVisibleToggle = el('video-layout-button-visible-toggle');
+  if (videoLayoutVisibleToggle) videoLayoutVisibleToggle.addEventListener('change', e => setVideoLayoutButtonVisible(e.target.checked));
+  document.querySelectorAll('[data-timeline-stat-toggle]').forEach(input => {
+    input.addEventListener('change', e => setTimelineStatVisible(
+      e.target.getAttribute('data-timeline-stat-toggle'),
+      e.target.checked,
+    ));
+  });
   const advTowToggle = el('advanced-tow-filter-toggle');
   if (advTowToggle) advTowToggle.addEventListener('change', e => setTowFilteringDisabledForTrustedSession(!e.target.checked));
   const advToggle = el('advanced-mode-toggle');
@@ -15094,158 +15718,325 @@ const SKEL_CONNECTIONS = [
   [30,32],[27,31],[28,32]
 ];
 
-// ── Hull 3D camera-pose tuning (live preview) ──────────────────────────
-// Live-preview offset applied to displayed skeletons in the 3D viewer so the
-// user sees the effect of the tuning sliders immediately. The EXACT placement is
-// produced by re-processing with cfg.camera_pose_offset; this preview is a
-// first-order approximation (exact for pure translation): each placed world point
-// p is re-expressed as if the camera rotated by the small offset about its own
-// position and then translated — p' = R_off·(p − camPos) + camPos + posOffset.
-const STL_TUNE_DEFAULT = Object.freeze({ pitch_deg:0, yaw_deg:0, roll_deg:0, x_m:0, y_m:0, z_m:0, hip_z_m:0, ankle_z_m:0 });
-const STL_TUNE_CAM_POS = [-3.194, 0.02, 0.585]; // nominal camera world position (config default)
-let stlTunePreview = { ...STL_TUNE_DEFAULT };
+// ── Boat keypoint calibration (manual PnP) ─────────────────────────────
+// Lets the user drag the detected boat keypoints to their true pixel location
+// and re-solve the camera pose. The camera is rigidly mounted to the boat, so the
+// solved pose is locked for the whole clip (Auto-PnP disabled) and persisted to
+// cvConfig.manual_camera_pose, then baked in on re-process.
+let _autoPnpMod = null;
+const _calib = {
+  fileId: null,
+  frameCanvas: null,    // ImageBitmap/Canvas of the calibration frame
+  frameW: 0, frameH: 0,
+  points: [],           // [{label, x, y}] in frame pixel coords
+  solved: null,         // last solve result
+  editor: { dragIdx: -1, scale: 1 },
+};
 
-function stlTuneOffsetActive(o = stlTunePreview) {
-  return Object.keys(STL_TUNE_DEFAULT).some(k => Number(o?.[k]) || 0);
-}
-
-// Build a world-frame rotation matrix (row-major 9) from small pitch/yaw/roll
-// offsets, matching the camera-relative convention Rz(roll)·Ry(yaw)·Rx(-pitch)
-// projected into world axes (X fwd, Y lat, Z up).
-function stlTuneRotMat(o) {
-  const d2r = Math.PI / 180;
-  const rx = -(Number(o.pitch_deg) || 0) * d2r; // pitch about lateral (Y)
-  const ry = (Number(o.yaw_deg) || 0) * d2r;    // yaw about vertical (Z)
-  const rz = (Number(o.roll_deg) || 0) * d2r;   // roll about fore-aft (X)
-  const cx=Math.cos(rx), sx=Math.sin(rx), cy=Math.cos(ry), sy=Math.sin(ry), cz=Math.cos(rz), sz=Math.sin(rz);
-  // Compose about world axes: roll→X, yaw→Z, pitch→Y
-  const Rroll = [1,0,0, 0,cz,-sz, 0,sz,cz];
-  const Ryaw  = [cy,-sy,0, sy,cy,0, 0,0,1];
-  const Rpit  = [cx,0,sx, 0,1,0, -sx,0,cx];
-  const mul = (A,B)=>[
-    A[0]*B[0]+A[1]*B[3]+A[2]*B[6], A[0]*B[1]+A[1]*B[4]+A[2]*B[7], A[0]*B[2]+A[1]*B[5]+A[2]*B[8],
-    A[3]*B[0]+A[4]*B[3]+A[5]*B[6], A[3]*B[1]+A[4]*B[4]+A[5]*B[7], A[3]*B[2]+A[4]*B[5]+A[5]*B[8],
-    A[6]*B[0]+A[7]*B[3]+A[8]*B[6], A[6]*B[1]+A[7]*B[4]+A[8]*B[7], A[6]*B[2]+A[7]*B[5]+A[8]*B[8],
-  ];
-  return mul(Rroll, mul(Ryaw, Rpit));
-}
-
-// Apply the live-preview offset to a landmark dict {idx:[x,y,z]} → new dict.
-function stlTuneApplyPreview(lm) {
-  if (!lm || !stlTuneOffsetActive()) return lm;
-  const o = stlTunePreview;
-  const R = stlTuneRotMat(o);
-  const cp = STL_TUNE_CAM_POS;
-  const dx = Number(o.x_m)||0, dy = Number(o.y_m)||0, dz0 = Number(o.z_m)||0;
-  const hipZ = Number(o.hip_z_m)||0;
-  const out = {};
-  for (const k of Object.keys(lm)) {
-    const p = lm[k];
-    if (!p) { out[k] = p; continue; }
-    const vx = p[0]-cp[0], vy = p[1]-cp[1], vz = p[2]-cp[2];
-    const rx = R[0]*vx + R[1]*vy + R[2]*vz;
-    const ry = R[3]*vx + R[4]*vy + R[5]*vz;
-    const rz = R[6]*vx + R[7]*vy + R[8]*vz;
-    out[k] = [rx+cp[0]+dx, ry+cp[1]+dy, rz+cp[2]+dz0+hipZ];
+async function getAutoPnpModule() {
+  if (!_autoPnpMod) {
+    _autoPnpMod = await import(new URL('./modules/autopnp-engine.js', import.meta.url).href);
   }
-  return out;
+  return _autoPnpMod;
 }
 
-// Slider id → (offset key, output formatter)
-const STL_TUNE_FIELDS = [
-  ['tune-pitch',  'pitch_deg', v => `${v.toFixed(1)}°`],
-  ['tune-yaw',    'yaw_deg',   v => `${v.toFixed(1)}°`],
-  ['tune-roll',   'roll_deg',  v => `${v.toFixed(1)}°`],
-  ['tune-x',      'x_m',       v => `${v.toFixed(2)} m`],
-  ['tune-y',      'y_m',       v => `${v.toFixed(2)} m`],
-  ['tune-z',      'z_m',       v => `${v.toFixed(2)} m`],
-  ['tune-hipz',   'hip_z_m',   v => `${v.toFixed(2)} m`],
-  ['tune-anklez', 'ankle_z_m', v => `${v.toFixed(2)} m`],
-];
-
-function stlTuneSyncInputsFromState() {
-  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
-    const input = el(id);
-    const out = el(`${id}-out`);
-    const v = Number(stlTunePreview[key]) || 0;
-    if (input) input.value = String(v);
-    if (out) out.textContent = fmt(v);
-  }
+function setCalibStatus(msg, kind = '') {
+  const e = el('stl-calib-status');
+  if (!e) return;
+  e.textContent = msg;
+  e.style.color = kind === 'ok' ? 'var(--green)' : (kind === 'err' ? 'var(--red,#e74c3c)' : 'var(--muted)');
 }
 
-function setStlTuneStatus(msg, kind = '') {
-  const elx = el('stl-tune-status');
-  if (!elx) return;
-  elx.textContent = msg;
-  elx.style.color = kind === 'ok' ? 'var(--green)' : (kind === 'err' ? 'var(--red, #e74c3c)' : 'var(--muted)');
+// Grab the current frame of a video element into a fresh canvas.
+function grabVideoFrameCanvas(videoEl) {
+  const w = videoEl.videoWidth, h = videoEl.videoHeight;
+  if (!w || !h) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(videoEl, 0, 0, w, h);
+  return c;
 }
 
-// Wire the Hull 3D tuning panel. onPreviewChange re-renders displayed skeletons.
-function setupStlTuningControls(onPreviewChange) {
-  // Initialise preview from the saved per-project offset.
-  const saved = state.cvConfig?.camera_pose_offset;
-  stlTunePreview = { ...STL_TUNE_DEFAULT, ...(saved && typeof saved === 'object' ? saved : {}) };
-  stlTuneSyncInputsFromState();
+function seekVideoAndWait(videoEl, t) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = () => { if (done) return; done = true; videoEl.removeEventListener('seeked', finish); resolve(); };
+    videoEl.addEventListener('seeked', finish, { once: true });
+    try { videoEl.currentTime = t; } catch { finish(); }
+    setTimeout(finish, 1500); // safety
+  });
+}
 
-  for (const [id, key, fmt] of STL_TUNE_FIELDS) {
-    const input = el(id);
-    const out = el(`${id}-out`);
-    if (!input) continue;
-    input.oninput = () => {
-      const v = Number(input.value) || 0;
-      stlTunePreview[key] = v;
-      if (out) out.textContent = fmt(v);
-      onPreviewChange?.();
-      setStlTuneStatus('Live preview — Save to keep, Re-process to bake into analysis.');
-    };
-  }
-
-  const resetBtn = el('btn-tune-reset');
-  if (resetBtn) resetBtn.onclick = () => {
-    stlTunePreview = { ...STL_TUNE_DEFAULT };
-    stlTuneSyncInputsFromState();
-    onPreviewChange?.();
-    setStlTuneStatus('Reset to no offset (not yet saved).');
-  };
-
-  const saveBtn = el('btn-tune-save');
-  if (saveBtn) saveBtn.onclick = async () => {
-    try {
-      await persistCameraPoseOffset();
-      setStlTuneStatus('Saved. Re-process to apply to skeleton positions.', 'ok');
-    } catch (e) {
-      console.error('[tune] save failed', e);
-      setStlTuneStatus(`Save failed: ${e.message || e}`, 'err');
+// Find the active slot video element to calibrate from.
+function getCalibrationVideoEl() {
+  for (const slot of state.tl?.athleteSlots || []) {
+    if (slot.currentFileId && slot.videoEl && slot.videoEl.videoWidth) {
+      return { videoEl: slot.videoEl, fileId: slot.currentFileId };
     }
-  };
-
-  const reprocBtn = el('btn-tune-reprocess');
-  if (reprocBtn) reprocBtn.onclick = async () => {
-    try {
-      await persistCameraPoseOffset();
-      setStlTuneStatus('Saved — re-processing videos with new tuning…', 'ok');
-      // Clear the live preview so the 3D view shows the freshly-baked result,
-      // not preview-on-top-of-baked.
-      stlTunePreview = { ...STL_TUNE_DEFAULT };
-      stlTuneSyncInputsFromState();
-      onPreviewChange?.();
-      await runSkeletonForAllVideos();
-      setStlTuneStatus('Re-process complete. Tuning is baked into the saved skeletons.', 'ok');
-    } catch (e) {
-      console.error('[tune] reprocess failed', e);
-      setStlTuneStatus(`Re-process failed: ${e.message || e}`, 'err');
-    }
-  };
+  }
+  return null;
 }
 
-// Persist the current preview offset into the project cvConfig.
-async function persistCameraPoseOffset() {
+// Auto-pick a high-confidence frame, detect boat keypoints, open the editor.
+async function startKeypointCalibration() {
+  const src = getCalibrationVideoEl();
+  if (!src) { setCalibStatus('No active video — park the playhead on a clip first.', 'err'); return; }
+  const AutoPnP = await getAutoPnpModule();
+  const videoEl = src.videoEl;
+  const wasPaused = videoEl.paused;
+  const origTime = videoEl.currentTime;
+  if (!wasPaused) { try { videoEl.pause(); } catch {} }
+  setCalibStatus('Scanning frames for a clear boat view…');
+
+  const dur = Number(videoEl.duration) || 0;
+  // Sample several frames spread across the clip; keep the most confident detection.
+  const ts = dur > 0
+    ? [0.1, 0.25, 0.4, 0.55, 0.7, 0.85].map(f => f * dur)
+    : [videoEl.currentTime];
+  let best = null;
+  for (const t of ts) {
+    await seekVideoAndWait(videoEl, t);
+    const canvas = grabVideoFrameCanvas(videoEl);
+    if (!canvas) continue;
+    let det;
+    try { det = await AutoPnP.detectBoatKeypoints(canvas); }
+    catch (e) { console.warn('[calib] detect failed', e); continue; }
+    const conf = Number(det?.confidence) || 0;
+    if (det && det.labels && (!best || conf > best.conf)) {
+      best = { det, canvas, t, conf };
+    }
+  }
+  // Restore the playhead so the timeline isn't left scrubbed elsewhere.
+  await seekVideoAndWait(videoEl, origTime);
+
+  if (!best) { setCalibStatus('Could not detect the boat in any sampled frame. Try a clearer section.', 'err'); return; }
+
+  _calib.fileId = src.fileId;
+  _calib.frameCanvas = best.canvas;
+  _calib.frameW = best.canvas.width;
+  _calib.frameH = best.canvas.height;
+  _calib.solved = null;
+  // Build the editable point list from labelled keypoints.
+  _calib.points = [];
+  for (const label of AutoPnP.KEYPOINT_LABELS) {
+    const idx = best.det.labels[label];
+    const kpt = (idx != null) ? best.det.keypoints[idx] : null;
+    if (kpt && isFinite(kpt.x) && isFinite(kpt.y)) {
+      _calib.points.push({ label, x: kpt.x, y: kpt.y });
+    }
+  }
+  if (_calib.points.length < 4) {
+    setCalibStatus(`Only ${_calib.points.length} keypoints found — need at least 4. Try another section.`, 'err');
+    return;
+  }
+  setCalibStatus(`Detected ${_calib.points.length} keypoints (conf ${(best.conf*100).toFixed(0)}%). Drag any that are off, then Apply.`, 'ok');
+  openCalibEditor();
+}
+
+// ── Editor overlay ─────────────────────────────────────────────────────
+function openCalibEditor() {
+  const modal = el('calib-editor-modal');
+  const canvas = el('calib-editor-canvas');
+  if (!modal || !canvas) return;
+  modal.classList.add('open');
+
+  // Fit canvas to the frame, capped by available space (CSS handles max-size).
+  canvas.width = _calib.frameW;
+  canvas.height = _calib.frameH;
+  drawCalibEditor();
+
+  const toFrameCoords = (ev) => {
+    const r = canvas.getBoundingClientRect();
+    const cx = (ev.clientX - r.left) / r.width * canvas.width;
+    const cy = (ev.clientY - r.top) / r.height * canvas.height;
+    return [cx, cy];
+  };
+  const hitRadius = Math.max(12, _calib.frameW * 0.012);
+  const pickPoint = (fx, fy) => {
+    let bi = -1, bd = hitRadius * hitRadius;
+    _calib.points.forEach((p, i) => {
+      const d = (p.x - fx) ** 2 + (p.y - fy) ** 2;
+      if (d < bd) { bd = d; bi = i; }
+    });
+    return bi;
+  };
+  canvas.onpointerdown = (ev) => {
+    const [fx, fy] = toFrameCoords(ev);
+    _calib.editor.dragIdx = pickPoint(fx, fy);
+    if (_calib.editor.dragIdx >= 0) canvas.setPointerCapture(ev.pointerId);
+  };
+  canvas.onpointermove = (ev) => {
+    if (_calib.editor.dragIdx < 0) return;
+    const [fx, fy] = toFrameCoords(ev);
+    const p = _calib.points[_calib.editor.dragIdx];
+    p.x = Math.max(0, Math.min(_calib.frameW, fx));
+    p.y = Math.max(0, Math.min(_calib.frameH, fy));
+    drawCalibEditor();
+  };
+  const endDrag = () => { _calib.editor.dragIdx = -1; };
+  canvas.onpointerup = endDrag;
+  canvas.onpointercancel = endDrag;
+
+  const close = () => closeCalibEditor();
+  const closeBtn = el('btn-calib-editor-close');
+  if (closeBtn) closeBtn.onclick = close;
+  const applyBtn = el('btn-calib-editor-apply');
+  if (applyBtn) applyBtn.onclick = async () => {
+    await resolveCalibrationPose();
+    closeCalibEditor();
+  };
+  const msg = el('calib-editor-msg');
+  if (msg) msg.textContent = 'Tip: drag points so each label sits exactly on its boat feature. Port = left side, Starboard = right.';
+}
+
+function closeCalibEditor() {
+  const modal = el('calib-editor-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+const CALIB_LABEL_COLORS = {
+  frontdeck: '#ffd54f',
+  porttop: '#ff6b6b', portmid: '#ff8a8a', portlow: '#ffb3b3', portback: '#ff3b3b',
+  starboardtop: '#4dabf7', starboardmid: '#74c0fc', starboardlow: '#a5d8ff', starboardback: '#1c7ed6',
+};
+
+function drawCalibEditor() {
+  const canvas = el('calib-editor-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (_calib.frameCanvas) ctx.drawImage(_calib.frameCanvas, 0, 0);
+  const r = Math.max(5, _calib.frameW * 0.006);
+  ctx.lineWidth = Math.max(1.5, _calib.frameW * 0.0015);
+  ctx.font = `${Math.max(11, Math.round(_calib.frameW * 0.013))}px sans-serif`;
+  ctx.textBaseline = 'middle';
+  for (const p of _calib.points) {
+    const col = CALIB_LABEL_COLORS[p.label] || '#2ecc71';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col;
+    ctx.globalAlpha = 0.85; ctx.fill(); ctx.globalAlpha = 1;
+    ctx.strokeStyle = '#000'; ctx.stroke();
+    ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.moveTo(p.x - r * 1.8, p.y); ctx.lineTo(p.x + r * 1.8, p.y);
+    ctx.moveTo(p.x, p.y - r * 1.8); ctx.lineTo(p.x, p.y + r * 1.8); ctx.stroke();
+    // label
+    ctx.fillStyle = '#000'; ctx.fillRect(p.x + r + 2, p.y - 8, ctx.measureText(p.label).width + 6, 16);
+    ctx.fillStyle = col; ctx.fillText(p.label, p.x + r + 5, p.y);
+  }
+}
+
+// Re-solve PnP from the edited keypoints (no detection — uses the dragged coords).
+async function resolveCalibrationPose() {
+  const src = getCalibrationVideoEl();
+  const AutoPnP = await getAutoPnpModule();
+  // Rebuild keypoints[] + labels{} from the edited point list.
+  const keypoints = _calib.points.map(p => ({ x: p.x, y: p.y, conf: 1.0 }));
+  const labels = {};
+  _calib.points.forEach((p, i) => { labels[p.label] = i; });
+  const det = { keypoints, labels, confidence: 1.0 };
+  // Use the calibration frame canvas as the intrinsics source (its resolution).
+  const sourceForK = _calib.frameCanvas || src?.videoEl;
+  let result = null;
+  try {
+    result = await AutoPnP.solveCameraPoseFromKeypoints(det, sourceForK);
+  } catch (e) {
+    console.error('[calib] solve failed', e);
+    setCalibStatus(`Solve failed: ${e.message || e}`, 'err');
+    return;
+  }
+  if (!result) {
+    setCalibStatus('PnP could not find a valid pose from these points (check that labels match the correct sides).', 'err');
+    return;
+  }
+  _calib.solved = result;
+  showCalibActions();
+  const a = result.angles || {};
+  el('stl-calib-result').textContent =
+    `Solved: pitch ${a.pitch_deg?.toFixed(1)}° yaw ${a.yaw_deg?.toFixed(1)}° roll ${a.roll_deg?.toFixed(1)}°, ` +
+    `pos [${result.camPos.map(v => v.toFixed(2)).join(', ')}], reproj ${result.meanErrorPx?.toFixed(1)}px.`;
+  setCalibStatus('Pose solved. Save to lock it for this project, or Save + Re-process to bake it in.', 'ok');
+}
+
+function showCalibActions() {
+  const a = el('stl-calib-actions');
+  if (a) a.style.display = '';
+}
+
+async function saveManualCameraPose() {
   if (!state.projectId) throw new Error('No project selected');
+  if (!_calib.solved) throw new Error('Nothing solved yet');
+  const s = _calib.solved;
   state.cvConfig = {
     ...(state.cvConfig || {}),
-    camera_pose_offset: { ...STL_TUNE_DEFAULT, ...stlTunePreview },
+    manual_camera_pose: {
+      camPos: s.camPos,
+      R_wc: s.R_wc,
+      angles: s.angles,
+      meanErrorPx: s.meanErrorPx,
+      keypoints: _calib.points.map(p => ({ label: p.label, x: p.x, y: p.y })),
+      frameSize: [_calib.frameW, _calib.frameH],
+      saved_at: new Date().toISOString(),
+    },
   };
   await DB.upsertCvConfig(state.projectId, state.cvConfig);
+}
+
+async function clearManualCameraPose() {
+  if (!state.projectId) return;
+  state.cvConfig = { ...(state.cvConfig || {}), manual_camera_pose: null };
+  await DB.upsertCvConfig(state.projectId, state.cvConfig);
+}
+
+// Wire the Hull 3D calibration panel buttons.
+function setupStlCalibrationControls() {
+  const startBtn = el('btn-calib-start');
+  if (startBtn) startBtn.onclick = async () => {
+    startBtn.disabled = true;
+    try { await startKeypointCalibration(); }
+    finally { startBtn.disabled = false; }
+  };
+  const resolveBtn = el('btn-calib-resolve');
+  if (resolveBtn) resolveBtn.onclick = () => openCalibEditor();
+  const cancelBtn = el('btn-calib-cancel');
+  if (cancelBtn) cancelBtn.onclick = () => {
+    const a = el('stl-calib-actions'); if (a) a.style.display = 'none';
+    _calib.solved = null;
+    setCalibStatus('Calibration discarded.');
+  };
+  const saveBtn = el('btn-calib-save');
+  if (saveBtn) saveBtn.onclick = async () => {
+    try { await saveManualCameraPose(); setCalibStatus('Saved. Re-process to apply to athlete positions.', 'ok'); }
+    catch (e) { setCalibStatus(`Save failed: ${e.message || e}`, 'err'); }
+  };
+  const reprocBtn = el('btn-calib-reprocess');
+  if (reprocBtn) reprocBtn.onclick = async () => {
+    try {
+      await saveManualCameraPose();
+      setCalibStatus('Saved — re-processing with calibrated pose…', 'ok');
+      await runSkeletonForAllVideos();
+      setCalibStatus('Re-process complete. Calibrated pose is baked into the skeletons.', 'ok');
+    } catch (e) { setCalibStatus(`Re-process failed: ${e.message || e}`, 'err'); }
+  };
+  const clearBtn = el('btn-calib-clear');
+  if (clearBtn) clearBtn.onclick = async () => {
+    try {
+      await clearManualCameraPose();
+      const a = el('stl-calib-actions'); if (a) a.style.display = 'none';
+      _calib.solved = null;
+      setCalibStatus('Calibration cleared — Auto-PnP will be used on next re-process.', 'ok');
+    } catch (e) { setCalibStatus(`Clear failed: ${e.message || e}`, 'err'); }
+  };
+
+  // Reflect existing saved calibration.
+  if (state.cvConfig?.manual_camera_pose) {
+    showCalibActions();
+    const mp = state.cvConfig.manual_camera_pose;
+    const a = mp.angles || {};
+    const res = el('stl-calib-result');
+    if (res) res.textContent = `Saved calibration: pitch ${a.pitch_deg?.toFixed?.(1) ?? '?'}° yaw ${a.yaw_deg?.toFixed?.(1) ?? '?'}° roll ${a.roll_deg?.toFixed?.(1) ?? '?'}°.`;
+    setCalibStatus('A manual calibration is saved for this project (Auto-PnP disabled).', 'ok');
+  }
 }
 
 async function loadSkeletonFrames(projectId, fileId) {
@@ -15490,7 +16281,10 @@ const INLINE_HEATMAP_BOAT_CENTER_X_BIAS = 0.0;
 const INLINE_HEATMAP_SCREEN_Y_BIAS = 0.0;
 
 function clearSlotInlineHeatmaps(slot) {
-  if (slot?._heatmapColEl) slot._heatmapColEl.replaceChildren();
+  if (slot?._heatmapColEl) {
+    slot._heatmapColEl.dataset.inlineHeatmapActive = '';
+    slot._heatmapColEl.replaceChildren();
+  }
 }
 
 function scheduleAnalysisMapResize() {
@@ -15512,9 +16306,15 @@ function syncInlineHeatmapPanelLayout() {
   const visible = !!state.inlineHeatmaps?.visible && !!state.advancedMode;
   for (const slot of state.tl?.athleteSlots || []) {
     const show = visible &&
-      slot?.paneEl &&
-      slot.paneEl.style.display !== 'none' &&
-      slot.paneEl.classList.contains('show-heatmaps');
+      slot?._heatmapColEl &&
+      (
+        slot._heatmapColEl.dataset.inlineHeatmapActive === '1' ||
+        (
+          slot?.paneEl &&
+          slot.paneEl.style.display !== 'none' &&
+          slot.paneEl.classList.contains('show-heatmaps')
+        )
+      );
     if (slot?._heatmapColEl) {
       slot._heatmapColEl.style.display = show ? 'flex' : 'none';
       if (show) activeCols.push(slot._heatmapColEl);
@@ -15523,11 +16323,17 @@ function syncInlineHeatmapPanelLayout() {
   layout.classList.toggle('heatmaps-open', visible && activeCols.length > 0);
   const colW = 280;
   const gap = Math.max(0, activeCols.length - 1) * 6;
-  const heatmapWidth = activeCols.length ? Math.min(680, activeCols.length * colW + gap + 10) : 0;
-  const statOpen = layout.classList.contains('stat-panel-open');
-  const statWidth = statOpen ? 300 : 0;
-  layout.style.setProperty('--inline-heatmap-width', `${heatmapWidth}px`);
-  layout.style.setProperty('--side-tools-width', `${heatmapWidth + statWidth}px`);
+  const defaultWidth = activeCols.length
+    ? Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, activeCols.length * colW + gap + 10)
+    : INLINE_HEATMAP_PANEL_MIN_WIDTH;
+  if (Number.isFinite(state.inlineHeatmaps?.widthPx)) {
+    applyInlineHeatmapPanelWidth(state.inlineHeatmaps.widthPx, false);
+  } else {
+    const clampedDefault = clampInlineHeatmapPanelWidth(defaultWidth);
+    if (Number.isFinite(clampedDefault)) {
+      layout.style.setProperty('--inline-heatmap-width', `${clampedDefault}px`);
+    }
+  }
   scheduleAnalysisMapResize();
 }
 
@@ -15560,6 +16366,7 @@ function setInlineHeatmapsVisible(visible) {
 function renderInlineHeatmapStateForSlot(slot, title, body, color = null) {
   const col = slot?._heatmapColEl;
   if (!col) return;
+  col.dataset.inlineHeatmapActive = '1';
   col.replaceChildren();
 
   const stateCard = document.createElement('section');
@@ -15599,6 +16406,7 @@ function renderInlineHeatmapLoading(seg, msg = 'Preparing report heatmaps...', p
 const INLINE_HEATMAP_SUMMARY_DEFS = Object.freeze([
   { key: 'sog', label: 'Avg SOG', decimals: 1, suffix: ' kt' },
   { key: 'heel', label: 'Avg Heel', decimals: 1, suffix: '\u00B0' },
+  { key: 'pitch', label: 'Avg Pitch', decimals: 1, suffix: '\u00B0' },
   { key: 'moment_roll', label: 'Avg RM', decimals: 0, suffix: ' Nm' },
   { key: 'trunk_angle', label: 'Avg TA', decimals: 1, suffix: '\u00B0' },
   { key: 'rudder', label: 'Avg RA', decimals: 1, suffix: '\u00B0' },
@@ -15892,7 +16700,7 @@ function isInlineHeatmapPlotOverlayOpen() {
 
 function getVisibleInlineHeatmapPlotSeries(plotKey) {
   const def = getInlineHeatmapPlotDef(plotKey);
-  if (!def) return [];
+  if (!def || !isInlineHeatmapMenuItemVisible(`plot_${def.key}`)) return [];
 
   const seg = getSegmentById(state.inlineHeatmaps?.segmentId) || getSegmentAtTs(state.tl?.currentTs);
   const segmentAthletes = getSegmentAthletes(seg);
@@ -15915,7 +16723,7 @@ function getVisibleInlineHeatmapPlotSeries(plotKey) {
 
 function getVisibleInlineHeatmapTileSeries(tileKey) {
   const def = getInlineHeatmapTileDef(tileKey);
-  if (!def) return [];
+  if (!def || !isInlineHeatmapMenuItemVisible(def.key)) return [];
 
   const seg = getSegmentById(state.inlineHeatmaps?.segmentId) || getSegmentAtTs(state.tl?.currentTs);
   const segmentAthletes = getSegmentAthletes(seg);
@@ -16102,7 +16910,7 @@ async function renderInlineHeatmapPlotOverlay() {
 
 function openInlineHeatmapPlotOverlay(plotKey) {
   const def = getInlineHeatmapPlotDef(plotKey);
-  if (!def) return;
+  if (!def || !isInlineHeatmapMenuItemVisible(`plot_${def.key}`)) return;
   state.inlineHeatmaps.expandedOverlayType = 'plot';
   state.inlineHeatmaps.expandedOverlayKey = def.key;
   renderInlineHeatmapPlotOverlay().catch(err => {
@@ -16112,7 +16920,7 @@ function openInlineHeatmapPlotOverlay(plotKey) {
 
 function openInlineHeatmapTileOverlay(tileKey) {
   const def = getInlineHeatmapTileDef(tileKey);
-  if (!def) return;
+  if (!def || !isInlineHeatmapMenuItemVisible(def.key)) return;
   state.inlineHeatmaps.expandedOverlayType = 'heatmap';
   state.inlineHeatmaps.expandedOverlayKey = def.key;
   renderInlineHeatmapPlotOverlay().catch(err => {
@@ -16171,7 +16979,10 @@ function initInlineHeatmapColSync(col) {
 
 function formatInlineHeatmapSummaryValue(statBlock, decimals = 1, suffix = '') {
   const avg = Number(statBlock?.avg);
-  return Number.isFinite(avg) ? `${avg.toFixed(decimals)}${suffix}` : '--';
+  if (!Number.isFinite(avg)) return '--';
+  const std = Number(statBlock?.std);
+  const stdText = Number.isFinite(std) ? std.toFixed(decimals) : '--';
+  return `${avg.toFixed(decimals)}+-${stdText}${suffix}`;
 }
 
 function createInlineHeatmapSectionLabel(text, color = null) {
@@ -16185,7 +16996,9 @@ function createInlineHeatmapSectionLabel(text, color = null) {
 function createInlineHeatmapSummaryGrid(result, color) {
   const grid = document.createElement('div');
   grid.className = 'video-side-stats-grid';
-  for (const def of INLINE_HEATMAP_SUMMARY_DEFS) {
+  const visibleDefs = INLINE_HEATMAP_SUMMARY_DEFS.filter(def => isInlineHeatmapMenuItemVisible(`summary_${def.key}`));
+  if (!visibleDefs.length) return null;
+  for (const def of visibleDefs) {
     const chip = document.createElement('div');
     chip.className = 'video-side-stat-chip';
     chip.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.16);
@@ -16255,6 +17068,11 @@ function createInlineHeatmapPlotTile(def, values, athleteName, color, plotJobs) 
 }
 
 function buildInlineHeatmapStatsCard(result, color, plotJobs, vmgContext = null) {
+  if (!isInlineHeatmapMenuItemVisible('stats')) return null;
+  const summaryGrid = createInlineHeatmapSummaryGrid(result, color);
+  const visiblePlotDefs = INLINE_HEATMAP_PLOT_DEFS.filter(def => isInlineHeatmapMenuItemVisible(`plot_${def.key}`));
+  if (!summaryGrid && !visiblePlotDefs.length) return null;
+
   const card = document.createElement('section');
   card.className = 'video-side-heatmap video-side-heatmap-stats';
   card.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.28);
@@ -16266,15 +17084,17 @@ function buildInlineHeatmapStatsCard(result, color, plotJobs, vmgContext = null)
   heading.style.color = color || '#d9e6f2';
   card.appendChild(heading);
 
-  card.appendChild(createInlineHeatmapSummaryGrid(result, color));
+  if (summaryGrid) card.appendChild(summaryGrid);
 
-  const plots = document.createElement('div');
-  plots.className = 'video-side-plots';
-  for (const def of INLINE_HEATMAP_PLOT_DEFS) {
-    const values = getInlineHeatmapPlotValues(def, result);
-    plots.appendChild(createInlineHeatmapPlotTile(def, values, result?.athlete_name, color, plotJobs));
+  if (visiblePlotDefs.length) {
+    const plots = document.createElement('div');
+    plots.className = 'video-side-plots';
+    for (const def of visiblePlotDefs) {
+      const values = getInlineHeatmapPlotValues(def, result);
+      plots.appendChild(createInlineHeatmapPlotTile(def, values, result?.athlete_name, color, plotJobs));
+    }
+    card.appendChild(plots);
   }
-  card.appendChild(plots);
   return card;
 }
 
@@ -16569,26 +17389,57 @@ function renderInlineHeatmapsForResults(seg, results, loadToken) {
     if (!slot?._heatmapColEl) continue;
     const result = findHeatmapResultForSlot(slot, results);
     if (!result) {
-      renderInlineHeatmapStateForSlot(
-        slot,
-        slot?.name || 'Heatmaps',
-        'No processed segment heatmaps are available for this video yet.',
-        slot?.color || '#5cc8ff',
-      );
+      if (slot._heatmapColEl) slot._heatmapColEl.dataset.inlineHeatmapActive = '';
+      if (slot?.paneEl?.style.display !== 'none') {
+        renderInlineHeatmapStateForSlot(
+          slot,
+          slot?.name || 'Heatmaps',
+          'No processed segment heatmaps are available for this video yet.',
+          slot?.color || '#5cc8ff',
+        );
+      } else if (slot._heatmapColEl) {
+        slot._heatmapColEl.replaceChildren();
+      }
       continue;
     }
 
     const color = resolveHeatmapAthleteColor(result, seg, segmentAthletes);
+    slot._heatmapColEl.dataset.inlineHeatmapActive = '1';
     slot._heatmapColEl.replaceChildren();
-    slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Heatmaps', color));
-    const kpJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('keypoint'), result?.keypoint_heatmap, color);
-    const comJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('com'), result?.com_heatmap, color);
+    let heatmapSectionShown = false;
+    const appendHeatmapSectionLabel = () => {
+      if (heatmapSectionShown) return;
+      slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Heatmaps', color));
+      heatmapSectionShown = true;
+    };
+    let kpJob = null;
+    let comJob = null;
+    if (isInlineHeatmapMenuItemVisible('keypoint')) {
+      appendHeatmapSectionLabel();
+      kpJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('keypoint'), result?.keypoint_heatmap, color);
+    }
+    if (isInlineHeatmapMenuItemVisible('com')) {
+      appendHeatmapSectionLabel();
+      comJob = buildInlineHeatmapTile(slot._heatmapColEl, getInlineHeatmapTileDef('com'), result?.com_heatmap, color);
+    }
     if (kpJob) heatmapJobs.push(kpJob);
     if (comJob) heatmapJobs.push(comJob);
-    slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Stats', color));
-    slot._heatmapColEl.appendChild(buildInlineHeatmapStatsCard(result, color, plotJobs, null));
+    const statsCard = buildInlineHeatmapStatsCard(result, color, plotJobs, null);
+    if (statsCard) {
+      slot._heatmapColEl.appendChild(createInlineHeatmapSectionLabel('Stats', color));
+      slot._heatmapColEl.appendChild(statsCard);
+    }
+    if (!heatmapSectionShown && !statsCard) {
+      renderInlineHeatmapStateForSlot(
+        slot,
+        slot?.name || 'Heatmaps',
+        'All Analysis heatmap menu items are hidden in Advanced Settings.',
+        color,
+      );
+    }
   }
   queueInlineHeatmapScrollSync();
+  syncInlineHeatmapPanelLayout();
   if (state.inlineHeatmaps?.expandedOverlayKey) {
     renderInlineHeatmapPlotOverlay().catch(err => {
       console.warn('[heatmaps] failed to refresh expanded overlay:', err);
@@ -16629,7 +17480,7 @@ function renderInlineHeatmapsForResults(seg, results, loadToken) {
   })();
 }
 
-async function syncInlineHeatmapsToCurrentSegment(seg = (isAnalysisViewActive() ? getSegmentAtTs(state.tl?.currentTs) : null), inAnalysis = isAnalysisViewActive()) {
+async function syncInlineHeatmapsToCurrentSegment(seg = getInlineHeatmapTargetSegment(), inAnalysis = isAnalysisViewActive()) {
   const enabled = !!state.inlineHeatmaps?.visible && !!state.advancedMode && !!inAnalysis;
 
   for (const slot of state.tl?.athleteSlots || []) {
@@ -16933,6 +17784,32 @@ function appendHeatmapTile(parent, title, hm, points, color, renderJobs) {
   renderJobs.push({ canvas, hm, points, color, frustumSize: 4.4, wrap });
 }
 
+function appendHeatmapStatsTile(parent, result, color) {
+  if (!isInlineHeatmapMenuItemVisible('stats')) return;
+  const tile = document.createElement('section');
+  tile.className = 'heatmap-tile';
+  tile.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.28);
+  tile.style.boxShadow = `inset 0 0 0 1px ${rgbaFromHex(color || '#5cc8ff', 0.08)}`;
+
+  const heading = document.createElement('div');
+  heading.className = 'heatmap-tile-title';
+  heading.textContent = 'Segment Stats';
+  heading.style.color = color || '#d9e6f2';
+  tile.appendChild(heading);
+
+  const summaryGrid = createInlineHeatmapSummaryGrid(result, color);
+  if (summaryGrid) {
+    tile.appendChild(summaryGrid);
+  } else {
+    const empty = document.createElement('div');
+    empty.className = 'heatmap-empty-tile';
+    empty.style.border = `1px solid ${rgbaFromHex(color || '#5cc8ff', 0.14)}`;
+    empty.textContent = 'No visible segment statistics are enabled.';
+    tile.appendChild(empty);
+  }
+  parent.appendChild(tile);
+}
+
 function buildHeatmapCard(result, seg, segmentAthletes, renderJobs) {
   const card = document.createElement('section');
   card.className = 'heatmap-card';
@@ -16962,6 +17839,7 @@ function buildHeatmapCard(result, seg, segmentAthletes, renderJobs) {
 
   const body = document.createElement('div');
   body.className = 'heatmap-card-body';
+  appendHeatmapStatsTile(body, result, color);
   appendHeatmapTile(body, 'All keypoints', result?.keypoint_heatmap, result?.kp_xy, color, renderJobs);
   appendHeatmapTile(body, 'Center of mass', result?.com_heatmap, result?.com_xy, color, renderJobs);
 
@@ -17141,8 +18019,10 @@ async function renderHeatmapPreview(seg, results, loadToken) {
   }
   replaceHeatmapContent(grid);
   setHeatmapPanelInfo(seg, {
-    status: renderJobs.length ? `Rendering ${renderJobs.length} heatmap${renderJobs.length === 1 ? '' : 's'}...` : 'No pose density yet',
-    statusTone: renderJobs.length ? 'loading' : 'error',
+    status: renderJobs.length
+      ? `Rendering ${renderJobs.length} heatmap${renderJobs.length === 1 ? '' : 's'}...`
+      : `${sortedResults.length} athlete${sortedResults.length === 1 ? '' : 's'} stats ready`,
+    statusTone: renderJobs.length ? 'loading' : 'ready',
   });
 
   if (!renderJobs.length) return;
@@ -17251,7 +18131,8 @@ function closeStlViewer() {
   setAdvancedPaneMode(null);
   if (modal) modal.classList.remove('open');
   el('panel-left')?.classList.remove('stl-open');
-  el('map').style.flex = '';
+  const mapWorkspace = el('map-workspace');
+  if (mapWorkspace) mapWorkspace.style.flex = '';
   el('stl-inline').style.flex = '';
   setTimeout(()=>{ if(state.map) state.map.invalidateSize(); }, 60);
 }
@@ -17420,7 +18301,6 @@ async function openStlViewer() {
   function updateEntryMesh(entry, lm) {
     const { bonePos, jointPos, boneGeom, jointGeom, comSphere } = entry;
     const HIDE = -9999; // off-screen Y for missing landmarks
-    if (lm) lm = stlTuneApplyPreview(lm); // live tuning preview (no-op when offset is zero)
     if(!lm) {
       for(let i = 0; i < NJ; i++) {
         jointPos[i*3] = 0; jointPos[i*3+1] = HIDE; jointPos[i*3+2] = 0;
@@ -17730,16 +18610,8 @@ async function openStlViewer() {
   tog('stl-tog-com', v => { for(const e of skelEntries) e.comSphere.visible = v; });
   tog('stl-tog-grid', v => { grid.visible = v; });
 
-  // ── Camera pose tuning controls ──────────────────────────────────────
-  // Force every displayed skeleton to re-render with the current preview offset.
-  const refreshTunedMeshes = () => {
-    for (const entry of skelEntries) {
-      const lm = entry._lastFrame?.lm || entry.frames?.[0]?.lm;
-      if (lm) updateEntryMesh(entry, lm);
-    }
-    sceneNeedsRender = true;
-  };
-  setupStlTuningControls(refreshTunedMeshes);
+  // ── Camera keypoint calibration ──────────────────────────────────────
+  setupStlCalibrationControls();
 
   let animId;
   let lastRenderTs = 0;
@@ -17821,8 +18693,3 @@ async function openStlViewer() {
 
 // ── Boot ───────────────────────────────────────────────────────────────
 init();
-
-
-
-
-

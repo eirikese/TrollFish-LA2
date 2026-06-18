@@ -352,6 +352,9 @@ export async function getSegments(projectId) {
   return db.segments.where('project_id').equals(projectId).toArray();
 }
 
+// Bulk replace — only needed for operations that reorder/rewrite the whole set.
+// Prefer putSegment/deleteSegmentRow for single-segment create/delete/rename so
+// each mutation is O(1) rather than O(n) (a full delete + re-add of every row).
 export async function saveSegments(projectId, segmentsList) {
   await db.transaction('rw', db.segments, async () => {
     await db.segments.where('project_id').equals(projectId).delete();
@@ -363,6 +366,19 @@ export async function saveSegments(projectId, segmentsList) {
     }));
     await db.segments.bulkAdd(rows);
   });
+}
+
+// Upsert a single segment (create or rename). Returns the persisted id.
+export async function putSegment(projectId, seg) {
+  const row = { ...seg, id: seg.id || uuid(), project_id: projectId };
+  await db.segments.put(row);
+  return row.id;
+}
+
+// Delete a single segment by id.
+export async function deleteSegmentRow(projectId, segId) {
+  await db.segments.where('project_id').equals(projectId)
+    .and(s => String(s.id) === String(segId)).delete();
 }
 
 

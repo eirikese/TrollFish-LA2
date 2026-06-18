@@ -339,6 +339,8 @@ function optimizeSogPointsForDevice(points) {
 
 function invalidateTimelineProcessedMetricCache(fileId = null, projectId = state.projectId) {
   const pid = String(projectId || '');
+  // A file's processed metrics changed → any segment report built from it is now stale.
+  clearSegmentReportCache();
   if (!fileId) {
     for (const key of [..._timelineProcessedMetricCache.keys()]) {
       if (!pid || key.startsWith(`${pid}:`)) _timelineProcessedMetricCache.delete(key);
@@ -2800,6 +2802,65 @@ function invalidateSegmentLookupCache() {
   _segmentLookupGen++;
   _overlapCache.clear();
   _athletesCache.clear();
+  // Any change to segments/videos/meta/colors can affect computed segment reports too.
+  clearSegmentReportCache();
+}
+
+/**
+ * Persistent (in-memory, session-scoped) cache for fully computed per-segment report
+ * results. `buildReportData` re-reads metrics/track (and, for heatmaps, skeleton) and
+ * recomputes all averages/derived stats every call — expensive and repeated every time a
+ * segment is revisited. We cache the single computed `segResult` per segment.
+ *
+ * Keyed by `${segId}|${wantHeatmaps}`; we keep separate scalar (no-heatmap) and
+ * with-heatmap entries so a cheap stats view never forces the heavy skeleton load.
+ * Invalidation is coarse: the whole cache is cleared whenever any input changes
+ * (reprocess/delete/wind update/project switch) via `clearSegmentReportCache()`.
+ */
+const _segReportCache = new Map(); // `${segId}|${wantHeatmaps}` -> Promise<segResult|null>
+
+function clearSegmentReportCache() {
+  _segReportCache.clear();
+}
+
+/**
+ * Return the computed report stats for a single segment, using the cache when possible.
+ * @param {object} seg
+ * @param {{ wantHeatmaps?: boolean }} [options]
+ * @returns {Promise<object|null>} the per-segment result object, or null.
+ */
+function getSegmentReport(seg, { wantHeatmaps = false } = {}) {
+  const segId = seg?.id != null ? String(seg.id) : null;
+  if (!segId || !state.projectId) {
+    // Uncacheable — compute directly.
+    return buildReportData(state.projectId, [String(seg?.id)], null, {
+      includeDensityImages: wantHeatmaps,
+      includeLegacyVisuals: false,
+      wind: buildReportWindContext(),
+    }).then(rd => pickSegmentResult(rd, seg?.id));
+  }
+  const key = `${segId}|${wantHeatmaps ? 1 : 0}`;
+  const cached = _segReportCache.get(key);
+  if (cached) return cached;
+  const promise = buildReportData(state.projectId, [segId], null, {
+    includeDensityImages: wantHeatmaps,
+    includeLegacyVisuals: false,
+    wind: buildReportWindContext(),
+  })
+    .then(rd => pickSegmentResult(rd, segId))
+    .catch(err => {
+      // Don't poison the cache with a failed computation.
+      _segReportCache.delete(key);
+      throw err;
+    });
+  _segReportCache.set(key, promise);
+  return promise;
+}
+
+function pickSegmentResult(reportData, segId) {
+  const key = String(segId);
+  const segs = Array.isArray(reportData?.segments) ? reportData.segments : [];
+  return segs.find(item => String(item?.split_id) === key) || null;
 }
 
 /**
@@ -7442,6 +7503,8 @@ async function loadWindEstimates() {
     if (token !== state.wind.loadToken) return;
     state.wind.loading = false;
     state.wind.session = combineSessionWindEstimates(Object.values(state.wind.byCsvId));
+    // Wind estimates feed VMG/segment reports — drop cached segment stats so they recompute.
+    clearSegmentReportCache();
     updateCurrentWindEstimate(state.tl?.currentTs, { forceRender: true });
     renderWindMapLayer();
     renderWindMapControl();
@@ -17540,23 +17603,9 @@ async function syncInlineHeatmapsToCurrentSegment(seg = getInlineHeatmapTargetSe
   try {
     renderInlineHeatmapLoading(seg, 'Collecting segment telemetry...', 0.02);
     await ensureWindEstimatesReady();
-    const reportData = await buildReportData(
-      state.projectId,
-      [segId],
-      (msg, pct) => {
-        if (loadToken !== state.inlineHeatmaps?.loadToken || !state.inlineHeatmaps?.visible) return;
-        renderInlineHeatmapLoading(seg, msg, pct);
-      },
-      {
-        includeDensityImages: true,
-        includeLegacyVisuals: false,
-        wind: buildReportWindContext(),
-      },
-    );
+    const segResult = await getSegmentReport(seg, { wantHeatmaps: true });
     if (loadToken !== state.inlineHeatmaps?.loadToken || !state.inlineHeatmaps?.visible) return;
-    const segmentResults = Array.isArray(reportData?.segments)
-      ? reportData.segments.filter(item => String(item?.split_id) === segId)
-      : [];
+    const segmentResults = segResult ? [segResult] : [];
     state.inlineHeatmaps.loading = false;
     state.inlineHeatmaps.results = segmentResults;
     renderInlineHeatmapsForResults(seg, segmentResults, loadToken);

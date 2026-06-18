@@ -1572,9 +1572,13 @@ export async function buildReportData(projectId, segmentIds, onProgress = null, 
       };
       const toSegmentT = (videoSec) => normalizeSegmentTime(videoSec2SegmentSecIndexed(trackIndex, videoSec, segStartSec));
 
-      // Load skeleton + metrics from OPFS
+      // Load metrics (cheap, always needed for scalar stats). Skeleton frames (raw pose
+      // data) are only consumed to build the keypoint heatmap density grid, so skip that
+      // heavy read entirely unless density images are requested.
       const [skelFrames, metricsIndex] = await Promise.all([
-        loadSkeletonFrames(projectId, file.id, vsStart, vsEnd),
+        includeDensityImages
+          ? loadSkeletonFrames(projectId, file.id, vsStart, vsEnd)
+          : Promise.resolve([]),
         loadMetricsCached(file.id),
       ]);
       const metricsWindow = sliceMetricsByVideoRange(metricsIndex, vsStart, vsEnd);

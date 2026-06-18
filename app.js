@@ -144,6 +144,7 @@ const state = {
     baseUrl: '',
     apiKey: '',
   },
+  apiDataEnabled: false,
   mapShouldAutoFit: true,
   mapBaseZoom: null,
   wind: {
@@ -218,6 +219,7 @@ const POSE_EXACT_SEGMENT_SEEK_KEY = 'trollfish_poseExactSegmentSeek_v1';
 const INLINE_HEATMAP_MENU_VISIBILITY_KEY = 'trollfish_inlineHeatmapMenuVisibility_v1';
 const INLINE_HEATMAP_PANEL_WIDTH_KEY = 'trollfish_inlineHeatmapPanelWidth_v1';
 const API_CSV_CONFIG_KEY = 'trollfish_apiCsvConfig_v1';
+const API_DATA_ENABLED_KEY = 'trollfish_apiDataEnabled_v1';
 const REPORT_OPTIONS_KEY = 'trollfish_reportOptions_v1';
 const REPORT_HISTORY_KEY_PREFIX = 'trollfish_reportHistory_';
 const REPORT_STORAGE_DIR = ['reports'];
@@ -881,6 +883,27 @@ function normalizeApiCsvBaseUrl(value) {
   return String(value || '').trim().replace(/\/+$/, '');
 }
 
+// API data feature: off by default. When off, the Telemetry API fields in setup are hidden.
+function loadApiDataEnabledSetting() {
+  state.apiDataEnabled = !!loadJsonLocal(API_DATA_ENABLED_KEY, false);
+  const toggle = el('feature-api-data-toggle');
+  if (toggle) toggle.checked = !!state.apiDataEnabled;
+  syncApiDataPanelVisibility();
+}
+
+function setApiDataEnabled(enabled) {
+  state.apiDataEnabled = !!enabled;
+  saveJsonLocal(API_DATA_ENABLED_KEY, state.apiDataEnabled);
+  const toggle = el('feature-api-data-toggle');
+  if (toggle) toggle.checked = !!state.apiDataEnabled;
+  syncApiDataPanelVisibility();
+}
+
+function syncApiDataPanelVisibility() {
+  const panel = el('api-csv-panel');
+  if (panel) panel.style.display = state.apiDataEnabled ? '' : 'none';
+}
+
 function loadApiCsvConfig() {
   const saved = loadJsonLocal(API_CSV_CONFIG_KEY, {});
   state.apiCsv = {
@@ -915,6 +938,7 @@ function syncApiCsvInputs(message = null, tone = '') {
 }
 
 function hasApiCsvConfig() {
+  if (!state.apiDataEnabled) return false;
   return !!normalizeApiCsvBaseUrl(state.apiCsv?.baseUrl) && !!String(state.apiCsv?.apiKey || '').trim();
 }
 
@@ -15466,6 +15490,7 @@ async function init() {
   loadInlineHeatmapMenuVisibilitySetting();
   loadInlineHeatmapPanelWidthSetting();
   loadApiCsvConfig();
+  loadApiDataEnabledSetting();
 
   await loadProjects();
 
@@ -15568,6 +15593,8 @@ async function init() {
   if (advTowToggle) advTowToggle.addEventListener('change', e => setTowFilteringDisabledForTrustedSession(!e.target.checked));
   const advToggle = el('advanced-mode-toggle');
   if (advToggle) advToggle.addEventListener('change', e => setAdvancedMode(e.target.checked));
+  const apiDataToggle = el('feature-api-data-toggle');
+  if (apiDataToggle) apiDataToggle.addEventListener('change', e => setApiDataEnabled(e.target.checked));
   const maneuverFeatureToggle = el('feature-maneuvers-toggle');
   if (maneuverFeatureToggle) maneuverFeatureToggle.addEventListener('change', e => setAdvancedFeature('maneuversTab', e.target.checked));
   const hullFeatureToggle = el('feature-hull3d-toggle');

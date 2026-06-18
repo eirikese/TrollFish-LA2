@@ -2834,9 +2834,11 @@ function clearSegmentReportCache() {
 
 /**
  * Return the computed report stats for a single segment, using the cache when possible.
+ * `buildReportData` returns one entry per (segment × athlete), so this resolves to an
+ * ARRAY of per-athlete results for the segment (one per athlete that overlaps it).
  * @param {object} seg
  * @param {{ wantHeatmaps?: boolean }} [options]
- * @returns {Promise<object|null>} the per-segment result object, or null.
+ * @returns {Promise<object[]>} the per-athlete result objects for this segment.
  */
 function getSegmentReport(seg, { wantHeatmaps = false } = {}) {
   const segId = seg?.id != null ? String(seg.id) : null;
@@ -2846,7 +2848,7 @@ function getSegmentReport(seg, { wantHeatmaps = false } = {}) {
       includeDensityImages: wantHeatmaps,
       includeLegacyVisuals: false,
       wind: buildReportWindContext(),
-    }).then(rd => pickSegmentResult(rd, seg?.id));
+    }).then(rd => pickSegmentResults(rd, seg?.id));
   }
   const key = `${segId}|${wantHeatmaps ? 1 : 0}`;
   const cached = _segReportCache.get(key);
@@ -2856,7 +2858,7 @@ function getSegmentReport(seg, { wantHeatmaps = false } = {}) {
     includeLegacyVisuals: false,
     wind: buildReportWindContext(),
   })
-    .then(rd => pickSegmentResult(rd, segId))
+    .then(rd => pickSegmentResults(rd, segId))
     .catch(err => {
       // Don't poison the cache with a failed computation.
       _segReportCache.delete(key);
@@ -2866,10 +2868,11 @@ function getSegmentReport(seg, { wantHeatmaps = false } = {}) {
   return promise;
 }
 
-function pickSegmentResult(reportData, segId) {
+// Return ALL per-athlete result rows for a segment (not just the first).
+function pickSegmentResults(reportData, segId) {
   const key = String(segId);
   const segs = Array.isArray(reportData?.segments) ? reportData.segments : [];
-  return segs.find(item => String(item?.split_id) === key) || null;
+  return segs.filter(item => String(item?.split_id) === key);
 }
 
 /**
@@ -17629,9 +17632,8 @@ async function syncInlineHeatmapsToCurrentSegment(seg = getInlineHeatmapTargetSe
   try {
     renderInlineHeatmapLoading(seg, 'Collecting segment telemetry...', 0.02);
     await ensureWindEstimatesReady();
-    const segResult = await getSegmentReport(seg, { wantHeatmaps: true });
+    const segmentResults = await getSegmentReport(seg, { wantHeatmaps: true });
     if (loadToken !== state.inlineHeatmaps?.loadToken || !state.inlineHeatmaps?.visible) return;
-    const segmentResults = segResult ? [segResult] : [];
     state.inlineHeatmaps.loading = false;
     state.inlineHeatmaps.results = segmentResults;
     renderInlineHeatmapsForResults(seg, segmentResults, loadToken);

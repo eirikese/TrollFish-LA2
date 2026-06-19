@@ -14575,6 +14575,28 @@ function setAnalysisColumnMinimized(column, minimized, { persist = true } = {}) 
 function showAllAnalysisColumns() {
   state.analysisColumns = { mapMinimized: false, videoMinimized: false };
   saveAnalysisColumnsSetting();
+
+  // Reset the resizable divider positions to balanced defaults so no column
+  // (map/stats, GoPro/phone video, external video) is left collapsed behind
+  // another after a previous drag pinned it to a tiny width.
+  const layout = el('layout');
+  const left = el('panel-left');
+  if (left) {
+    // Let the map↔video divider return to the flex default split.
+    left.style.width = '';
+    left.style.flex = '';
+  }
+  if (state.phonePlayback) {
+    // Drop the pinned GoPro/phone shell width so the shell falls back to its
+    // proportional default and the external video grid keeps its share.
+    state.phonePlayback.savedShellWidthPx = null;
+    state.phonePlayback.savedActiveLeftWidthPx = null;
+    state.phonePlayback.savedLeftWidthPx = null;
+  }
+  if (layout?.classList.contains('phone-playback-active')) {
+    unlockPhonePlaybackGridWidth();
+  }
+
   applyAnalysisColumnsState();
 }
 

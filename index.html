@@ -329,7 +329,8 @@
     #maneuver-analysis-content { min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px 14px 16px; }
     #phone-playback-shell { display: none; flex: 0 0 clamp(240px, 22vw, 360px); min-width: 0; padding: 4px 0 4px 4px; background: #000; overflow: hidden; }
     #layout.phone-playback-active #phone-playback-shell { display: flex; }
-    #phone-playback-divider { display: none; width: 5px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; }
+    #phone-playback-divider { position: relative; display: none; width: 10px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; z-index: 5; }
+    #phone-playback-divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; cursor: col-resize; }
     #layout.phone-playback-active #phone-playback-divider { display: block; }
     #phone-playback-divider:hover, #phone-playback-divider.dragging { background: var(--accent); }
     #layout.video-col-minimized.phone-playback-active #phone-playback-shell { flex: 1 1 auto !important; width: auto !important; padding: 4px; }

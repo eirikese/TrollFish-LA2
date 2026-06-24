@@ -135,6 +135,7 @@
     .wiz-body { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 0 24px; }
     .wiz-page { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
     .wiz-page.active { display: flex; }
+    #wiz-page-3.active { overflow-y: auto; }
     .wiz-footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px calc(16px + var(--safe-bottom)); flex-shrink: 0; }
     .wiz-footer .spacer { flex: 1; }
 
@@ -152,6 +153,26 @@
     /* Drop zone */
     .drop-zone { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed var(--border); border-radius: var(--radius-lg); background: var(--surface); cursor: pointer; transition: border-color .15s, background .15s; min-height: 180px; gap: 10px; padding: 24px; }
     .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: rgba(26,115,232,.04); }
+    /* Per-athlete import boxes (wizard step 3) */
+    .import-boxes-wrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; align-items: start; }
+    .import-box { position: relative; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); padding: 12px; min-width: 0; }
+    .import-box .drop-zone { flex: 0 0 auto; }
+    /* Importing state: blur contents + spinner overlay */
+    .import-box.importing > *:not(.import-box-overlay) { filter: blur(2.5px); opacity: .55; pointer-events: none; transition: filter .15s, opacity .15s; }
+    .import-box-overlay { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; border-radius: var(--radius-lg); background: rgba(255,255,255,.45); backdrop-filter: blur(1px); }
+    .import-box-overlay-text { font-size: 12px; font-weight: 600; color: var(--accent); text-align: center; padding: 0 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+    .import-box-overlay-ps { font-size: 11px; font-weight: 500; color: var(--muted); text-align: center; padding: 0 12px; margin-top: -4px; max-width: 100%; }
+    .import-box-overlay.passive { background: rgba(255,255,255,.35); }
+    .import-spinner { width: 30px; height: 30px; border-radius: 50%; border: 3px solid rgba(26,115,232,.25); border-top-color: var(--accent); animation: import-spin .8s linear infinite; }
+    @keyframes import-spin { to { transform: rotate(360deg); } }
+    .import-box-hdr { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .import-box-dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; border: 2px solid rgba(0,0,0,.1); }
+    .import-box-name { font-size: 15px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .import-box-count { font-size: 12px; color: var(--muted); flex-shrink: 0; }
+    .import-box.external .import-box-name { color: var(--muted); }
+    .import-box .drop-zone { min-height: 92px; padding: 14px; }
+    .import-box-files { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+    .import-box-files:empty { display: none; }
     .drop-zone-icon { font-size: 40px; color: var(--muted); line-height: 1; }
     .drop-zone-text { font-size: 15px; color: var(--muted); text-align: center; }
     .drop-zone-text strong { color: var(--accent); }
@@ -196,8 +217,7 @@
     #main-wrap { display: flex; flex-direction: column; height: calc(100vh - var(--topbar-h)); height: calc(100svh - var(--topbar-h)); height: calc(100dvh - var(--topbar-h)); overflow: hidden; }
     #layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
     #panel-left { display: flex; flex-direction: column; width: 58%; min-width: 0; min-height: 0; flex-shrink: 0; overflow: hidden; }
-    #layout.phone-playback-active #panel-left { width: max(0px, calc(58% - var(--phone-playback-width, 0px))); }
-    #layout.map-col-minimized #panel-left { display: none; }
+    #layout.map-col-minimized #panel-left { display: none !important; width: 0 !important; }
     #layout.video-col-minimized #panel-right { display: none; }
     #map-workspace { position: relative; display: flex; flex: 1; min-height: 120px; min-width: 0; overflow: hidden; }
     #map { flex: 1 1 auto; min-width: 0; min-height: 120px; position: relative; }
@@ -329,7 +349,7 @@
     #maneuver-analysis-content { min-height: 0; display: flex; flex-direction: column; gap: 12px; padding: 12px 14px 16px; }
     #phone-playback-shell { display: none; flex: 0 0 clamp(240px, 22vw, 360px); min-width: 0; padding: 4px 0 4px 4px; background: #000; overflow: hidden; }
     #layout.phone-playback-active #phone-playback-shell { display: flex; }
-    #phone-playback-divider { position: relative; display: none; width: 10px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; z-index: 5; }
+    #phone-playback-divider { position: relative; display: none; width: 10px; background: var(--border); cursor: col-resize; flex-shrink: 0; touch-action: none; z-index: 6; }
     #phone-playback-divider::before { content: ''; position: absolute; top: 0; bottom: 0; left: -8px; right: -8px; cursor: col-resize; }
     #layout.phone-playback-active #phone-playback-divider { display: block; }
     #phone-playback-divider:hover, #phone-playback-divider.dragging { background: var(--accent); }
@@ -1183,12 +1203,7 @@
         <div class="wiz-connector" data-after="2"></div>
         <div class="wiz-step" data-step="3">
           <span class="wiz-step-num">3</span>
-          <span class="wiz-step-label">Upload Files</span>
-        </div>
-        <div class="wiz-connector" data-after="3"></div>
-        <div class="wiz-step" data-step="4">
-          <span class="wiz-step-num">4</span>
-          <span class="wiz-step-label">Ready</span>
+          <span class="wiz-step-label">Import &amp; Assign</span>
         </div>
       </div>
 
@@ -1226,19 +1241,15 @@
           </div>
         </div>
 
-        <!-- STEP 3: Upload Files -->
+        <!-- STEP 3: Import & Assign (per-athlete boxes) -->
         <div class="wiz-page" id="wiz-page-3">
           <div class="section-hdr">
-            <h3>Upload your session files</h3>
+            <h3>Import files for each athlete</h3>
             <div style="display:flex;gap:6px;">
               <button class="btn" id="btn-refresh"><svg class="icon-svg"><use href="#ico-refresh"/></svg></button>
             </div>
           </div>
-          <div id="drop-zone" class="drop-zone">
-            <span class="drop-zone-icon"><svg class="icon-svg" style="width:48px;height:48px"><use href="#ico-upload"/></svg></span>
-            <div class="drop-zone-text"><strong>Click to browse</strong> or drag & drop files here</div>
-            <div class="drop-zone-hint">Accepts .mp4, .mov, .csv files</div>
-          </div>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:10px;">Drop each sailor's videos and CSV into their box. Files are assigned to that athlete on import.</p>
           <div class="api-csv-panel" id="api-csv-panel">
             <div class="api-csv-field">
               <label for="api-csv-url">Telemetry API</label>
@@ -1251,18 +1262,8 @@
             <button class="btn sm" id="btn-api-csv-save" type="button">Save</button>
             <div id="api-csv-status">Optional: when saved, video GPS time is used to fetch matching API telemetry as CSV tracks.</div>
           </div>
-          <div id="files-wrap" class="uploaded-files-list"><div id="files-list"></div></div>
-        </div>
-
-        <!-- STEP 4: Ready -->
-        <div class="wiz-page" id="wiz-page-4">
-          <div class="ready-wrap">
-            <div class="ready-icon" id="ready-icon">&#10003;</div>
-            <div class="ready-title" id="ready-title">You're all set!</div>
-            <div class="ready-subtitle" id="ready-subtitle">Your files are uploaded and athletes are assigned. Head to the Analysis view to explore GPS tracks, synced video playback, and skeleton data.</div>
-            <div class="ready-summary" id="ready-summary"></div>
-            <button class="btn primary" id="btn-go-analysis" style="font-size:16px;padding:12px 36px;margin-top:12px;"><svg class="icon-svg" style="width:18px;height:18px"><use href="#ico-eye"/></svg> Go to Analysis</button>
-          </div>
+          <div id="import-boxes" class="import-boxes-wrap"></div>
+          <div class="ready-summary" id="ready-summary" style="margin-top:14px;"></div>
         </div>
       </div>
 
@@ -1271,6 +1272,7 @@
         <button class="btn" id="btn-wiz-back" style="display:none;"><svg class="icon-svg"><use href="#ico-skip-back"/></svg> Back</button>
         <span class="spacer"></span>
         <button class="btn primary" id="btn-wiz-next">Next <svg class="icon-svg" style="width:14px;height:14px"><use href="#ico-skip-fwd"/></svg></button>
+        <button class="btn primary" id="btn-go-analysis" style="display:none;"><svg class="icon-svg" style="width:14px;height:14px"><use href="#ico-eye"/></svg> Go to Analysis</button>
       </div>
     </div>
     <input type="file" id="file-input" multiple accept=".mp4,.mov,.csv" style="display:none" />
@@ -1522,6 +1524,14 @@
             <span>Video layout button</span>
             <span class="stl-tog"><input type="checkbox" id="video-layout-button-visible-toggle"><span class="stl-tog-sl"></span></span>
           </label>
+          <label class="stl-tog-row" title="Show the Segments bar below the map. Hidden by default.">
+            <span>Segments bar</span>
+            <span class="stl-tog"><input type="checkbox" id="show-segments-bar-toggle"><span class="stl-tog-sl"></span></span>
+          </label>
+          <label class="stl-tog-row" title="Show the Tracks bar below the map. Hidden by default.">
+            <span>Tracks bar</span>
+            <span class="stl-tog"><input type="checkbox" id="show-tracks-bar-toggle"><span class="stl-tog-sl"></span></span>
+          </label>
           <label class="stl-tog-row" title="Run boom angle predictions during pose and maneuver processing">
             <span>Boom predictions</span>
             <span class="stl-tog"><input type="checkbox" id="feature-boom-predictions-toggle"><span class="stl-tog-sl"></span></span>
@@ -1542,12 +1552,12 @@
             <label class="stl-tog-row"><span>COG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heading" checked><span class="stl-tog-sl"></span></span></label>
             <label class="stl-tog-row"><span>Heel</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="heel" checked><span class="stl-tog-sl"></span></span></label>
             <label class="stl-tog-row"><span>Pitch</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="pitch" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>VMG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="vmg" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>TWA</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="twa" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>Roll M</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="roll" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>Trunk</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="trunk" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>Rudder</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="rudder" checked><span class="stl-tog-sl"></span></span></label>
-            <label class="stl-tog-row"><span>Boom</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="boom" checked><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>VMG</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="vmg"><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>TWA</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="twa"><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Roll M</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="roll"><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Trunk</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="trunk"><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Rudder</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="rudder"><span class="stl-tog-sl"></span></span></label>
+            <label class="stl-tog-row"><span>Boom</span><span class="stl-tog"><input type="checkbox" data-timeline-stat-toggle="boom"><span class="stl-tog-sl"></span></span></label>
           </div>
         </div>
         <div class="advanced-settings-group" id="ath-settings-wrap">
@@ -1568,9 +1578,9 @@
             </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="3D pose keeps the existing boat-space skeleton pipeline. 2D pose estimates trunk angle directly from MediaPipe image landmarks. Turn off skips all video analysis — segments still get CSV/track-derived numeric averages.">Pose mode:
               <select id="pose-mode-select" style="background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px 6px;font-size:13px;">
-                <option value="3d" selected>3D pose</option>
+                <option value="3d">3D pose</option>
                 <option value="2d">2D pose</option>
-                <option value="off">Turn off</option>
+                <option value="off" selected>Turn off</option>
               </select>
             </label>
             <label style="font-size:13px;color:var(--muted);display:flex;align-items:center;gap:4px;" title="Minimum MediaPipe trunk landmark certainty for accepting 2D pose trunk angle detections.">2D certainty:

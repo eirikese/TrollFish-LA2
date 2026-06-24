@@ -510,6 +510,21 @@ async function processVideoFile(projectId, fileRec, onProgress) {
 /**
  * Run GPS matching for all video↔CSV track pairs in a project.
  */
+function matchVideoCsvGroup(videoTracks, csvTracks) {
+  if (videoTracks.length === 0 || csvTracks.length === 0) return [];
+  const continuousCsvTracks = csvTracks.filter(isContinuousCsvTrack);
+  if (continuousCsvTracks.length > 0) {
+    const nonContinuousCsvTracks = csvTracks.filter(track => !isContinuousCsvTrack(track));
+    const out = [];
+    for (const videoTrack of videoTracks) {
+      const contMatches = matchVideoTracksToCsv([videoTrack], continuousCsvTracks);
+      out.push(...(contMatches.length ? contMatches : matchVideoTracksToCsv([videoTrack], nonContinuousCsvTracks)));
+    }
+    return out;
+  }
+  return matchVideoTracksToCsv(videoTracks, csvTracks);
+}
+
 export async function runMatching(projectId) {
   const files = await DB.listFiles(projectId);
   const playbackOnlyIds = new Set(
@@ -517,6 +532,14 @@ export async function runMatching(projectId) {
       .filter(file => file.kind === 'video' && isStoredPlaybackOnlyVideo(file))
       .map(file => String(file.id))
   );
+  // Athlete ownership is assigned explicitly at import time. Matching is scoped
+  // per athlete so a video↔CSV link can only form within the same athlete's
+  // imported files — never across athletes (no GPS-overlap auto-mapping).
+  const fileMeta = await DB.getFileMeta(projectId);
+  const athleteOf = (fileId) => {
+    const a = fileMeta?.[String(fileId)]?.athlete_id;
+    return a ? String(a) : null;
+  };
   const allTracks = await DB.listTracks(projectId);
   const videoTracks = [];
   const csvTracks = [];
@@ -529,6 +552,7 @@ export async function runMatching(projectId) {
       points,
       filename: file?.filename || '',
       meta: track.meta || {},
+      athlete_id: athleteOf(track.file_id),
     };
     if (track.kind === 'video') {
       if (!playbackOnlyIds.has(String(track.file_id))) videoTracks.push(entry);
@@ -542,16 +566,18 @@ export async function runMatching(projectId) {
     return;
   }
 
-  const continuousCsvTracks = csvTracks.filter(isContinuousCsvTrack);
-  let matches = [];
-  if (continuousCsvTracks.length > 0) {
-    const nonContinuousCsvTracks = csvTracks.filter(track => !isContinuousCsvTrack(track));
-    for (const videoTrack of videoTracks) {
-      const contMatches = matchVideoTracksToCsv([videoTrack], continuousCsvTracks);
-      matches.push(...(contMatches.length ? contMatches : matchVideoTracksToCsv([videoTrack], nonContinuousCsvTracks)));
-    }
-  } else {
-    matches = matchVideoTracksToCsv(videoTracks, csvTracks);
+  // Group both sides by athlete and match within each group only.
+  const byAthlete = new Map(); // athleteId -> { videos:[], csvs:[] }
+  const bucket = (id) => {
+    if (!byAthlete.has(id)) byAthlete.set(id, { videos: [], csvs: [] });
+    return byAthlete.get(id);
+  };
+  for (const v of videoTracks) { if (v.athlete_id) bucket(v.athlete_id).videos.push(v); }
+  for (const c of csvTracks) { if (c.athlete_id) bucket(c.athlete_id).csvs.push(c); }
+
+  const matches = [];
+  for (const { videos, csvs } of byAthlete.values()) {
+    matches.push(...matchVideoCsvGroup(videos, csvs));
   }
   await DB.replaceMatches(projectId, matches);
 }

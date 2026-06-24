@@ -119,10 +119,13 @@ const state = {
     maneuversTab: false,
     hull3d: false,
     windPanel: false,
-    boomPredictions: true,
-    rudderPredictions: true,
+    boomPredictions: false,
+    rudderPredictions: false,
   },
   videoLayout: 'auto',
+  // Segments / Tracks bars below the map start hidden; toggled in Settings.
+  showSegmentsBar: false,
+  showTracksBar: false,
   hiddenVideoSlots: {},
   timelineStatsWindowSec: 1,
   timelineStatOverlayGraph: false,
@@ -166,6 +169,9 @@ const state = {
     selectedFileId: null,
     currentFileId: null,
     desiredFileId: null,
+    // Last external-video marker the user clicked. When several external clips
+    // overlap at the same time, this one wins so the timeline shows it.
+    preferredFileId: null,
     videoEl: null,
     paneVisible: false,
     savedLeftWidthPx: null,
@@ -203,6 +209,8 @@ const CSV_MEMORY_PREFIX_LEN = 6;
 const ADVANCED_MODE_KEY = 'trollfish_advancedMode_v1';
 const ADVANCED_FEATURES_KEY = 'trollfish_advancedFeatures_v1';
 const VIDEO_LAYOUT_KEY = 'trollfish_videoLayout_v1';
+const SHOW_SEGMENTS_BAR_KEY = 'trollfish_showSegmentsBar_v1';
+const SHOW_TRACKS_BAR_KEY = 'trollfish_showTracksBar_v1';
 const HIDDEN_VIDEO_SLOTS_KEY_PREFIX = 'trollfish_hiddenVideoSlots_';
 const TL_STATS_WINDOW_KEY = 'trollfish_tlStatsWindowSec_v1';
 const TL_STATS_OVERLAY_GRAPH_KEY = 'trollfish_tlStatsOverlayGraph_v1';
@@ -231,8 +239,8 @@ const DEFAULT_ADVANCED_FEATURES = Object.freeze({
   maneuversTab: false,
   hull3d: false,
   windPanel: false,
-  boomPredictions: true,
-  rudderPredictions: true,
+  boomPredictions: false,
+  rudderPredictions: false,
 });
 const DEFAULT_INLINE_HEATMAP_MENU_VISIBILITY = Object.freeze({
   keypoint: false,
@@ -314,7 +322,15 @@ function isIpadHeavyVideoProject(videoCount = getProjectVideoCount()) {
 }
 
 function getVideoURLCacheLimit() {
-  if (!USE_IPAD_VIDEO_WORKAROUNDS) return 64;
+  if (!USE_IPAD_VIDEO_WORKAROUNDS) {
+    // Desktop edition streams path-backed files via protocol, so a cached URL is
+    // cheap — keep a generous cache. In the browser each cached Blob URL pins the
+    // whole video Blob in RAM, so for large projects an over-large cache causes
+    // memory pressure and intermittent decode failures ("randomly doesn't play").
+    // Bound the browser cache so only the clips near the playhead stay resident.
+    if (globalThis.window?.trollfishDesktop?.isDesktop) return 64;
+    return getProjectVideoCount() > 12 ? 10 : 16;
+  }
   return isIpadHeavyVideoProject() ? IPAD_HEAVY_VIDEO_URL_CACHE_LIMIT : IPAD_LIGHT_VIDEO_URL_CACHE_LIMIT;
 }
 
@@ -452,11 +468,19 @@ function setVideoLayoutButtonVisible(enabled) {
   syncVideoLayoutButton();
 }
 
+// Channels shown by default on first run; everything else starts hidden.
+// User toggles in Settings still override these and persist.
+const DEFAULT_TIMELINE_STAT_VISIBLE = Object.freeze({
+  sog: true, heading: true, heel: true, pitch: true,
+});
+
 function normalizeTimelineStatVisibility(raw = {}) {
   const input = raw && typeof raw === 'object' ? raw : {};
   const out = {};
   for (const def of TIMELINE_STAT_DEFS) {
-    out[def.key] = input[def.key] == null ? true : !!input[def.key];
+    out[def.key] = input[def.key] == null
+      ? !!DEFAULT_TIMELINE_STAT_VISIBLE[def.key]
+      : !!input[def.key];
   }
   return out;
 }
@@ -496,6 +520,36 @@ function setTimelineStatVisible(metricKey, visible) {
   updateTimelineStats(true);
 }
 
+// ── Segments / Tracks bar visibility (below the map) ───────────────
+function applyMapBarsVisibility() {
+  const segPanel = el('segment-panel');
+  if (segPanel) segPanel.style.display = state.showSegmentsBar ? '' : 'none';
+  const trackPanel = el('track-panel');
+  if (trackPanel) trackPanel.style.display = state.showTracksBar ? '' : 'none';
+  const segToggle = el('show-segments-bar-toggle');
+  if (segToggle) segToggle.checked = !!state.showSegmentsBar;
+  const trackToggle = el('show-tracks-bar-toggle');
+  if (trackToggle) trackToggle.checked = !!state.showTracksBar;
+}
+
+function loadMapBarsVisibilitySetting() {
+  state.showSegmentsBar = !!loadJsonLocal(SHOW_SEGMENTS_BAR_KEY, false);
+  state.showTracksBar = !!loadJsonLocal(SHOW_TRACKS_BAR_KEY, false);
+  applyMapBarsVisibility();
+}
+
+function setShowSegmentsBar(visible) {
+  state.showSegmentsBar = !!visible;
+  saveJsonLocal(SHOW_SEGMENTS_BAR_KEY, state.showSegmentsBar);
+  applyMapBarsVisibility();
+}
+
+function setShowTracksBar(visible) {
+  state.showTracksBar = !!visible;
+  saveJsonLocal(SHOW_TRACKS_BAR_KEY, state.showTracksBar);
+  applyMapBarsVisibility();
+}
+
 function normalizePoseInputMaxDim(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return 480;
@@ -524,7 +578,7 @@ function normalizePoseMinConfidence(value) {
 }
 
 function loadPoseProcessingSettings() {
-  state.poseMode = normalizePoseMode(loadJsonLocal(POSE_MODE_KEY, '3d'));
+  state.poseMode = normalizePoseMode(loadJsonLocal(POSE_MODE_KEY, 'off'));
   state.poseMinConfidence = normalizePoseMinConfidence(loadJsonLocal(POSE_MIN_CONFIDENCE_KEY, 0.8));
   state.poseInputMaxDim = normalizePoseInputMaxDim(loadJsonLocal(POSE_INPUT_MAX_DIM_KEY, 480));
   state.poseExactSegmentSeek = !!loadJsonLocal(POSE_EXACT_SEGMENT_SEEK_KEY, false);
@@ -600,13 +654,12 @@ function saveInlineHeatmapMenuVisibilitySetting() {
 function clampInlineHeatmapPanelWidth(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return null;
-  const workspace = el('map-workspace');
-  const dividerW = el('inline-heatmap-divider')?.offsetWidth || 0;
-  const available = workspace?.clientWidth
-    ? Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, workspace.clientWidth - dividerW - 140)
-    : INLINE_HEATMAP_PANEL_MAX_WIDTH;
-  const maxW = Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, available));
-  return Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(maxW, Math.round(num)));
+  // Clamp ONLY to the panel's own min/max — never against the live map-workspace
+  // width. Tying it to the workspace coupled this panel to the map↔video divider:
+  // shrinking the map column re-clamped (shrank) the segment-stats panel to "make
+  // room for the map". The map column is flex:1 and absorbs the difference, so the
+  // segment-stats panel keeps the width the user chose, independently.
+  return Math.max(INLINE_HEATMAP_PANEL_MIN_WIDTH, Math.min(INLINE_HEATMAP_PANEL_MAX_WIDTH, Math.round(num)));
 }
 
 function applyInlineHeatmapPanelWidth(widthPx, persist = false) {
@@ -1221,6 +1274,17 @@ function updateAthleteLibraryFromCurrentState() {
   if (changed) saveAthleteLibrary(library.slice(0, 128));
 }
 
+// Drop an athlete from the remembered-athlete library so an explicit delete
+// stays deleted — otherwise loadAthletes() re-seeds it into any empty project
+// and the removed athlete reappears in the athletes pane.
+function removeAthleteFromLibrary(name) {
+  const key = normalizeAthleteName(name).toLowerCase();
+  if (!key) return;
+  const library = loadAthleteLibrary();
+  const next = library.filter(a => String(a.name || '').trim().toLowerCase() !== key);
+  if (next.length !== library.length) saveAthleteLibrary(next);
+}
+
 function loadCsvAthleteMemory() {
   const raw = loadJsonLocal(CSV_ATHLETE_MEMORY_KEY, { exact: {}, prefix: {} });
   const exact = raw && typeof raw.exact === 'object' ? raw.exact : {};
@@ -1399,6 +1463,11 @@ function collectPinnedVideoIds(absTs = state.tl?.currentTs) {
   const phonePlayback = state.phonePlayback || {};
   if (phonePlayback.currentFileId) pinned.add(phonePlayback.currentFileId);
   if (phonePlayback.desiredFileId) pinned.add(phonePlayback.desiredFileId);
+  if (phonePlayback.preferredFileId) pinned.add(phonePlayback.preferredFileId);
+  // Pin whatever Blob URL is actually bound to the external/phone <video> right
+  // now — otherwise the LRU prune can revoke a source mid-playback (one cause of
+  // an external clip "randomly" not playing).
+  if (phonePlayback.videoEl?._loadedFileId) pinned.add(phonePlayback.videoEl._loadedFileId);
   if (isPhonePlaybackEnabled()) {
     const phoneItem = getPhonePlaybackItemAtTs(absTs, phonePlayback.currentFileId);
     if (phoneItem?.id) pinned.add(phoneItem.id);
@@ -1740,7 +1809,21 @@ function tryPlaySlotVideo(slot, expectedFileId = slot?.currentFileId) {
 
   setSlotPlaybackRate(slot, state.tl.playbackRate);
   const p = videoEl.play();
-  if (p?.catch) p.catch(() => {});
+  if (p?.catch) {
+    // On any platform a play() can reject if the element isn't decode-ready yet
+    // (common when many videos contend for decoders). Retry once readiness fires
+    // instead of silently leaving the pane frozen — a cause of "randomly doesn't
+    // play" with large projects.
+    p.catch(() => {
+      if (!state.tl.playing || slot.currentFileId !== expectedFileId) return;
+      const retryOnce = () => {
+        if (!state.tl.playing || slot.currentFileId !== expectedFileId) return;
+        const p2 = videoEl.play();
+        if (p2?.catch) p2.catch(() => {});
+      };
+      videoEl.addEventListener('canplay', retryOnce, { once: true });
+    });
+  }
 
   if (!USE_IPAD_VIDEO_WORKAROUNDS) return;
   if (!videoEl.paused && videoEl.readyState >= 2) return;
@@ -2147,13 +2230,18 @@ function syncPhonePlaybackShellSize() {
   // video grid flex to fill the rest. Sizing the shell (not the grid) keeps the
   // grid filling the page edge-to-edge with no overflow or gap when the total
   // available width changes (e.g. dragging the map↔video divider).
-  const minW = 0;
+  // When the external video is shown it must actually get usable width — never
+  // let a previously dragged-tiny saved width collapse it to a sliver. Enforce a
+  // floor (unless the user has explicitly minimized the athlete video column,
+  // handled by the early-return above).
+  const minW = Math.min(280, Math.round(totalW * 0.25));
   // Reserve room so the external grid never gets squeezed below its min width.
   const minGridW = 240;
   const maxW = Math.max(minW, totalW - minGridW);
   const savedShellW = Number(state.phonePlayback?.savedShellWidthPx);
   const fallbackW = Math.round(totalW * 0.32);
-  const nextW = Math.max(minW, Math.min(Number.isFinite(savedShellW) ? savedShellW : fallbackW, maxW));
+  const desiredW = Number.isFinite(savedShellW) && savedShellW > 0 ? savedShellW : fallbackW;
+  const nextW = Math.max(minW, Math.min(desiredW, maxW));
   state.phonePlayback.savedShellWidthPx = nextW;
   // Record the grid width purely for bookkeeping; panel-right stays flex:1.
   setPhonePlaybackGridWidth(totalW - nextW);
@@ -2162,36 +2250,16 @@ function syncPhonePlaybackShellSize() {
   syncPhonePlaybackMapOffset();
 }
 
+// The three analysis columns (map | external video | GoPro grid) are now sized
+// independently: the map↔video divider controls panel-left width, the
+// external↔GoPro divider controls the shell width, and panel-right flexes to
+// fill the rest. This function intentionally no longer reaches across to
+// panel-left — the old --phone-playback-width coupling made the two dividers
+// fight each other (one bar's drag moved the other / the map sprang open).
 function syncPhonePlaybackMapOffset() {
   const layout = el('layout');
-  const left = el('panel-left');
-  const shell = el('phone-playback-shell');
-  const divider = el('phone-playback-divider');
   if (!layout) return;
-  const active = layout.classList.contains('phone-playback-active');
-  const compact = window.matchMedia('(max-width: 760px)').matches;
-  if (!active || compact) {
-    layout.style.setProperty('--phone-playback-width', '0px');
-    if (left && left.style.flex === 'none' && Number.isFinite(Number(state.phonePlayback?.savedLeftWidthPx))) {
-      left.style.width = `${state.phonePlayback.savedLeftWidthPx}px`;
-    }
-    state.phonePlayback.savedLeftWidthPx = null;
-    return;
-  }
-
-  const savedShellW = Number(state.phonePlayback?.savedShellWidthPx);
-  const shellW = Math.max(0, Number.isFinite(savedShellW) ? savedShellW : (shell?.getBoundingClientRect().width || 0));
-  const dividerW = divider?.offsetWidth || 0;
-  const totalW = shellW + dividerW;
-  layout.style.setProperty('--phone-playback-width', `${totalW}px`);
-
-  if (left && left.style.flex === 'none') {
-    if (!Number.isFinite(Number(state.phonePlayback?.savedLeftWidthPx))) {
-      state.phonePlayback.savedLeftWidthPx = left.getBoundingClientRect().width;
-    }
-    const base = Number(state.phonePlayback.savedLeftWidthPx) || left.getBoundingClientRect().width;
-    left.style.width = `max(0px, calc(${Math.round(base)}px - var(--phone-playback-width, 0px)))`;
-  }
+  layout.style.setProperty('--phone-playback-width', '0px');
 }
 
 function lockPhonePlaybackGridWidth() {
@@ -2233,6 +2301,11 @@ function setPhonePlaybackVisible(item, visible, message = '') {
   phone.paneVisible = !!visible;
   setPhonePlaybackLayoutActive(!!visible);
   syncPhonePlaybackShellSize();
+  // First time the external video appears the panes may not be laid out yet, so
+  // syncPhonePlaybackShellSize() can bail before pinning the shell width — which
+  // leaves the ext-vid↔GoPro divider stacked on top of the map↔video divider and
+  // the first drag grabs the wrong one. Re-sync after layout settles.
+  if (visible) requestAnimationFrame(() => syncPhonePlaybackShellSize());
   if (phone.emptyEl) {
     phone.emptyEl.textContent = message || 'No phone video at this time';
     phone.emptyEl.style.display = visible && message ? 'flex' : 'none';
@@ -2322,7 +2395,17 @@ async function switchPhonePlaybackSource(item, videoSec, autoPlayAfterLoad = fal
   try { videoEl.volume = 1; } catch {}
   if (autoPlayAfterLoad || state.tl.playing) {
     const playPromise = videoEl.play();
-    if (playPromise?.catch) playPromise.catch(() => {});
+    if (playPromise?.catch) playPromise.catch(() => {
+      // Retry once the element is decode-ready — prevents the external video from
+      // silently never starting when many videos contend for decoders.
+      if (phone.currentFileId !== fileId || !state.tl.playing) return;
+      const retryOnce = () => {
+        if (phone.currentFileId !== fileId || !state.tl.playing) return;
+        const p2 = videoEl.play();
+        if (p2?.catch) p2.catch(() => {});
+      };
+      videoEl.addEventListener('canplay', retryOnce, { once: true });
+    });
   } else {
     try { videoEl.pause(); } catch {}
   }
@@ -2585,7 +2668,8 @@ async function selectProject(id) {
   destroyVideoSlots();
   const hasPid = !!id;
   el('btn-del-proj').disabled = !hasPid;
-  el('files-list').innerHTML = '';
+  const filesListEl = el('files-list');
+  if (filesListEl) filesListEl.innerHTML = '';
   el('ath-list').innerHTML = '';
   updateProjectLabel();
   renderProjectMenu();
@@ -2628,8 +2712,7 @@ async function selectProject(id) {
   // Reset wizard step based on project data
   const setup = getSetupState();
   if(!setup.hasAthletes) state.wizardStep = 2;
-  else if(!setup.hasFiles) state.wizardStep = 3;
-  else state.wizardStep = 4;
+  else state.wizardStep = 3;
 
   // ── File reconnection: try OPFS blobs + handles silently, then prompt ──
   if (setup.hasFiles) {
@@ -2784,6 +2867,14 @@ function getPhonePlaybackItemAtTs(absTs, preferredFileId = null) {
   if (!Number.isFinite(absTs)) return null;
   const mediaItems = getPlaybackTimelineMedia();
   if (!mediaItems.length) return null;
+  // The clip the user last clicked in the scrub line wins over everything else
+  // while it still covers the current time — this is how overlapping external
+  // videos are disambiguated.
+  const clickedId = state.phonePlayback?.preferredFileId;
+  if (clickedId) {
+    const clicked = mediaItems.find(item => String(item?.id || '') === String(clickedId || ''));
+    if (clicked && videoContainsAbsTs(clicked, absTs)) return clicked;
+  }
   if (preferredFileId) {
     const preferred = mediaItems.find(item => String(item?.id || '') === String(preferredFileId || ''));
     if (preferred && videoContainsAbsTs(preferred, absTs)) return preferred;
@@ -10810,8 +10901,15 @@ function renderTimelineMediaLayer() {
     marker.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
+      // Remember this as the last-clicked clip so it wins when external videos
+      // overlap, then jump playback to its start.
+      if (state.phonePlayback) state.phonePlayback.preferredFileId = String(item?.id || '') || null;
       const clipStartTs = Number.isFinite(startTs) ? startTs : getTimelineMediaStartTs(item);
-      if (Number.isFinite(clipStartTs)) tlSeekTo(clipStartTs);
+      if (Number.isFinite(clipStartTs)) {
+        tlSeekTo(clipStartTs);
+      } else {
+        renderTimelineMediaLayer();
+      }
     });
     layer.appendChild(marker);
   });
@@ -11723,6 +11821,7 @@ function initKeyboard() {
 // ── Files tab ──────────────────────────────────────────────────────────
 function renderFilesList() {
   const list = el('files-list');
+  if(!list) return; // legacy wizard file list removed; analysis view uses import boxes
   list.innerHTML = '';
   if(!state.mapData) return;
   const all = [...(state.mapData.videos||[]).map(v=>({...v,kind:'video'})),
@@ -11804,6 +11903,8 @@ async function deleteFile(fileId, name) {
     delete state.trackVisibility[fileId];
     await loadMapData();
     renderFilesList();
+    renderImportBoxes();
+    renderAthletes();
     buildTimeline();
     updateSetupUiState();
   });
@@ -11844,7 +11945,7 @@ function openAssignPopup(fileId, anchor, kind) {
   popup.appendChild(noneOpt);
   for(const a of state.athletes){
     const opt = document.createElement('div');
-    opt.className='assign-opt'; opt.textContent=`${a.name} (${a.weight??'?'}kg${a.height ? `, ${a.height}cm` : ''})`;
+    opt.className='assign-opt'; opt.textContent=a.name;
     opt.onclick = async()=>{
       if (kind === 'video') {
         await setVideoExternalMode(fileId, { external: false, athleteId: a.id });
@@ -11933,6 +12034,10 @@ function deleteAthlete(id) {
   if(!ath) return;
   confirmDialog('Delete Athlete', `Remove "${ath.name}"?`, async ()=>{
     state.athletes = state.athletes.filter(a=>a.id!==id);
+    // Purge from the remembered-athlete library so the delete sticks. saveAthletes()
+    // below re-merges every remaining athlete, so a name still used by another
+    // athlete is restored — only the truly removed one is forgotten.
+    removeAthleteFromLibrary(ath.name);
     await saveAthletes();
     renderAthletes();
     renderFilesList();
@@ -12005,21 +12110,21 @@ function getSetupState() {
     steps: {
       1: hasProject,
       2: hasAthletes,
-      3: hasFiles && !state.uploadInProgress,
-      4: hasProject && hasFiles && hasAthletes && assignmentsReady && !state.uploadInProgress,
+      // Step 3 (Import & Assign) is the final step: done only when fully ready.
+      3: hasProject && hasFiles && hasAthletes && assignmentsReady && !state.uploadInProgress,
     },
   };
 }
 
 function renderWizardStatus() {
   const setup = getSetupState();
-  const currentStep = Math.max(1, Math.min(4, state.wizardStep || 1));
+  const currentStep = Math.max(1, Math.min(3, state.wizardStep || 1));
   document.querySelectorAll('.wiz-step').forEach(stepEl => {
     const stepNum = parseInt(stepEl.dataset.step, 10);
     stepEl.classList.remove('active', 'done', 'warn');
     if (stepNum === currentStep) stepEl.classList.add('active');
     if (setup.steps[stepNum]) stepEl.classList.add('done');
-    if (stepNum === 4 && currentStep === 4 && !setup.ready) stepEl.classList.add('warn');
+    if (stepNum === 3 && currentStep === 3 && !setup.ready) stepEl.classList.add('warn');
   });
   document.querySelectorAll('.wiz-connector').forEach(connector => {
     const after = parseInt(connector.dataset.after, 10);
@@ -12031,34 +12136,41 @@ function renderWizardStatus() {
 }
 
 function syncWizardFooterButtons(step = state.wizardStep) {
-  const total = 4;
+  const total = 3;
   const backBtn = el('btn-wiz-back');
   const nextBtn = el('btn-wiz-next');
+  const goBtn = el('btn-go-analysis');
   if (!backBtn || !nextBtn) return;
   const currentStep = Math.max(1, Math.min(total, step || 1));
   const setup = getSetupState();
   backBtn.style.display = currentStep === 1 ? 'none' : '';
   if (currentStep === total) {
+    // Final step (Import & Assign) — no Next; "Go to Analysis" lives on this
+    // same persistent footer line, disabled until import/matching finishes.
     nextBtn.style.display = 'none';
+    if (goBtn) {
+      goBtn.style.display = '';
+      goBtn.disabled = !setup.ready;
+    }
     return;
   }
+  if (goBtn) goBtn.style.display = 'none';
   nextBtn.style.display = '';
   nextBtn.disabled =
     (currentStep === 1 && !setup.hasProject) ||
-    (currentStep === 2 && !setup.hasAthletes) ||
-    (currentStep === 3 && (!setup.hasFiles || state.uploadInProgress));
+    (currentStep === 2 && !setup.hasAthletes);
   nextBtn.innerHTML = 'Next <svg class="icon-svg" style="width:14px;height:14px"><use href="#ico-skip-fwd"/></svg>';
 }
 
 function updateSetupUiState() {
   syncWizardFooterButtons();
   renderWizardStatus();
-  if (state.wizardStep === 4) renderReadySummary();
+  if (state.wizardStep === 3) { renderImportBoxes(); renderReadySummary(); }
 }
 
 // ── Wizard step navigation ─────────────────────────────────────────────
 function wizGoTo(step) {
-  const total = 4;
+  const total = 3;
   if (!state.projectId && step > 1) step = 1;
   step = Math.max(1, Math.min(total, step));
   state.wizardStep = step;
@@ -12073,13 +12185,12 @@ function wizGoTo(step) {
   // Refresh content for each step
   if(step === 1) renderProfileStep();
   if(step === 2) renderAthletes();
-  if(step === 3) renderFilesList();
-  if(step === 4) renderReadySummary();
+  if(step === 3) { renderImportBoxes(); renderReadySummary(); }
   renderWizardStatus();
 }
 
 function wizNext() {
-  if(state.wizardStep < 4) wizGoTo(state.wizardStep + 1);
+  if(state.wizardStep < 3) wizGoTo(state.wizardStep + 1);
 }
 function wizBack() {
   if(state.wizardStep > 1) wizGoTo(state.wizardStep - 1);
@@ -12125,7 +12236,7 @@ function renderAssignList() {
       let options = '<option value="">— Select athlete —</option>';
       for(const a of state.athletes) {
         const sel = a.id === curAthId ? ' selected' : '';
-        options += `<option value="${a.id}"${sel}>${a.name}${a.weight ? ' (' + a.weight + 'kg)' : ''}</option>`;
+        options += `<option value="${a.id}"${sel}>${a.name}</option>`;
       }
       card.innerHTML = `
         <span class="f-kind csv">CSV</span>
@@ -12177,7 +12288,7 @@ function renderAssignList() {
       let options = '<option value="">— Select athlete to analyze —</option>';
       for(const a of state.athletes) {
         const sel = (!isExternal && a.id === curAthId) ? ' selected' : '';
-        options += `<option value="${a.id}"${sel}>${a.name}${a.weight ? ' (' + a.weight + 'kg)' : ''}</option>`;
+        options += `<option value="${a.id}"${sel}>${a.name}</option>`;
       }
       const extSel = isExternal ? ' selected' : '';
       options += `<option value="__external__"${extSel}>External — not analyzed</option>`;
@@ -12512,32 +12623,33 @@ function makeNativeFile(p) {
   };
 }
 
-function initDropZone() {
-  const zone = el('drop-zone');
-  const fileIn = el('file-input');
-  if(!zone || !fileIn) return;
+// ── Per-athlete import boxes (wizard step 3) ───────────────────────────
+// `target` is { athleteId } for an athlete box, or { external: true } for the
+// external-videos box. It is threaded through to processFileUpload, which stamps
+// ownership on each ingested file (no cross-athlete GPS auto-mapping).
 
+function importTargetAcceptsExt(target, name) {
+  // External box accepts videos only; athlete boxes accept videos + CSV.
+  if (target?.external) return /\.(mp4|mov|m4v)$/i.test(name);
+  return /\.(mp4|mov|m4v|csv)$/i.test(name);
+}
+
+function wireImportZone(zone, target) {
   zone.addEventListener('click', async () => {
     if(!state.projectId) { alert('Please select or create a project first.'); return; }
-    // Desktop edition: native picker returns real disk paths. Files are
-    // referenced by absolute path (durable across sessions) instead of being
-    // copied into evictable browser storage — fixes the next-day reload bug.
+    // Desktop edition: native picker returns real disk paths (durable).
     if (window.trollfishDesktop?.isDesktop) {
       if (_filePickerOpen) return;
       _filePickerOpen = true;
       try {
-        const picked = await window.trollfishDesktop.pickFiles({
-          title: 'Add session files',
-          filters: [
-            { name: 'Videos & CSV', extensions: ['mp4', 'mov', 'm4v', 'csv'] },
-            { name: 'All files', extensions: ['*'] },
-          ],
-        });
+        const filters = target?.external
+          ? [{ name: 'Videos', extensions: ['mp4', 'mov', 'm4v'] }, { name: 'All files', extensions: ['*'] }]
+          : [{ name: 'Videos & CSV', extensions: ['mp4', 'mov', 'm4v', 'csv'] }, { name: 'All files', extensions: ['*'] }];
+        const picked = await window.trollfishDesktop.pickFiles({ title: 'Add session files', filters });
         if (!picked.length) return;
-        // Build lazy, path-backed File-likes. Video bytes are read on demand
-        // (range reads) — never loaded whole into memory.
-        const files = picked.map((p) => makeNativeFile(p));
-        await handleFileUpload(files, null);
+        const files = picked.map((p) => makeNativeFile(p)).filter(f => importTargetAcceptsExt(target, f.name));
+        if (!files.length) { alert(target?.external ? 'The external box accepts videos only.' : 'No supported files selected.'); return; }
+        await handleFileUpload(files, null, target);
       } catch (e) {
         console.warn('Native file picker error:', e);
       } finally {
@@ -12550,106 +12662,299 @@ function initDropZone() {
       if (_filePickerOpen) return;
       _filePickerOpen = true;
       try {
+        const accept = target?.external
+          ? { 'video/*': ['.mp4', '.mov'] }
+          : { 'video/*': ['.mp4', '.mov'], 'text/csv': ['.csv'] };
         const handles = await window.showOpenFilePicker({
           multiple: true,
-          types: [
-            { description: 'Videos & CSV', accept: { 'video/*': ['.mp4', '.mov'], 'text/csv': ['.csv'] } },
-          ],
+          types: [{ description: target?.external ? 'Videos' : 'Videos & CSV', accept }],
         });
         if (!handles.length) return;
-        const files = await Promise.all(handles.map(h => h.getFile()));
-        await handleFileUpload(files, handles);
+        let files = await Promise.all(handles.map(h => h.getFile()));
+        const pairs = files.map((f, i) => [f, handles[i]]).filter(([f]) => importTargetAcceptsExt(target, f.name));
+        if (!pairs.length) { alert(target?.external ? 'The external box accepts videos only.' : 'No supported files selected.'); return; }
+        await handleFileUpload(pairs.map(p => p[0]), pairs.map(p => p[1]), target);
       } catch (e) {
         if (e.name !== 'AbortError') console.warn('File picker error:', e);
       } finally {
         _filePickerOpen = false;
       }
     } else {
+      const fileIn = el('file-input');
+      if (!fileIn) return;
+      fileIn.onchange = async (e) => {
+        const all = Array.from(e.target.files); e.target.value = ''; fileIn.onchange = null;
+        const files = all.filter(f => importTargetAcceptsExt(target, f.name));
+        if (!files.length) { if (all.length) alert(target?.external ? 'The external box accepts videos only.' : 'No supported files selected.'); return; }
+        await handleFileUpload(files, null, target);
+      };
+      fileIn.accept = target?.external ? '.mp4,.mov,.m4v' : '.mp4,.mov,.m4v,.csv';
       fileIn.click();
     }
   });
 
-  zone.addEventListener('dragover', e => {
-    e.preventDefault();
-    zone.classList.add('dragover');
-  });
-  zone.addEventListener('dragleave', e => {
-    e.preventDefault();
-    zone.classList.remove('dragover');
-  });
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+  zone.addEventListener('dragleave', e => { e.preventDefault(); zone.classList.remove('dragover'); });
   zone.addEventListener('drop', async e => {
     e.preventDefault();
     zone.classList.remove('dragover');
     if(!state.projectId) { alert('Please select or create a project first.'); return; }
-    const files = Array.from(e.dataTransfer.files).filter(f => /\.(mp4|mov|csv)$/i.test(f.name));
-    if(!files.length) return;
-    await handleFileUpload(files, null);
-  });
-
-  fileIn.addEventListener('change', async e => {
-    const files = Array.from(e.target.files); e.target.value = '';
-    if(!files.length) return;
-    await handleFileUpload(files, null);
+    const all = Array.from(e.dataTransfer.files);
+    const files = all.filter(f => importTargetAcceptsExt(target, f.name));
+    if(!files.length) { if (all.length) alert(target?.external ? 'The external box accepts videos only.' : 'No supported files dropped.'); return; }
+    await handleFileUpload(files, null, target);
   });
 }
 
-async function handleFileUpload(files, handles = null) {
-  _uploadChain = _uploadChain.then(() => processFileUpload(files, handles));
+function buildImportZoneEl(target) {
+  const zone = document.createElement('div');
+  zone.className = 'drop-zone';
+  const hint = target?.external ? 'Accepts .mp4, .mov files' : 'Accepts .mp4, .mov, .csv files';
+  zone.innerHTML = `<span class="drop-zone-icon"><svg class="icon-svg" style="width:36px;height:36px"><use href="#ico-upload"/></svg></span>`
+    + `<div class="drop-zone-text"><strong>Click to browse</strong> or drag & drop</div>`
+    + `<div class="drop-zone-hint">${hint}</div>`;
+  wireImportZone(zone, target);
+  return zone;
+}
+
+// Targets currently importing → live status message, keyed by importTargetKey().
+const _importBusy = new Map();
+function importTargetKey(target) {
+  if (target?.external) return 'external';
+  if (target?.athleteId) return 'ath:' + target.athleteId;
+  return '';
+}
+function setImportBusy(target, message) {
+  const key = importTargetKey(target);
+  if (!key) return;
+  if (message == null) _importBusy.delete(key);
+  else _importBusy.set(key, message);
+}
+function applyImportBusyState(box, target) {
+  const key = importTargetKey(target);
+  const message = _importBusy.get(key);
+  // While any import is processing, blur every import window — not just the one
+  // being uploaded to — so nothing else can be touched mid-processing.
+  if (message == null && !state.uploadInProgress) return;
+  box.classList.add('importing');
+  const overlay = document.createElement('div');
+  overlay.className = 'import-box-overlay';
+  if (message != null) {
+    overlay.innerHTML = `<div class="import-spinner"></div>`
+      + `<div class="import-box-overlay-text">${message || 'Processing…'}</div>`
+      + `<div class="import-box-overlay-ps">PS: stay in this window for faster processing</div>`;
+  } else {
+    // Other athletes' windows: blurred and disabled, but no spinner/text.
+    overlay.classList.add('passive');
+  }
+  box.appendChild(overlay);
+}
+
+function renderImportBoxes() {
+  const wrap = el('import-boxes');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  if (!state.projectId) return;
+
+  const fileMeta = state.fileMeta || {};
+  const csvs = (state.mapData?.csvs || []).map(c => ({ ...c, kind: 'csv' }));
+  const videos = (state.mapData?.videos || []).map(v => ({ ...v, kind: 'video' }));
+  const allFiles = [...videos, ...csvs];
+
+  const fileRow = (f) => {
+    const row = document.createElement('div');
+    row.className = 'file-item';
+    const kindCls = f.kind === 'csv' ? 'csv' : 'video';
+    const fname = f.filename || f.name || 'unknown';
+    row.innerHTML = `<span class="f-kind ${kindCls}">${f.kind === 'csv' ? 'CSV' : 'VID'}</span>`
+      + `<span class="f-name">${fname}</span>`
+      + `<button class="f-del-btn" title="Delete file"><svg class="icon-svg" style="width:13px;height:13px"><use href="#ico-trash"/></svg></button>`;
+    row.querySelector('.f-del-btn').onclick = (e) => {
+      e.stopPropagation();
+      deleteFile(f.id, fname);
+    };
+    return row;
+  };
+
+  // One box per athlete
+  for (const ath of state.athletes) {
+    const athIdx = state.athletes.indexOf(ath);
+    const owned = allFiles.filter(f => String(fileMeta[f.id]?.athlete_id || '') === String(ath.id) && !isPlaybackOnlyVideo(f));
+    const box = document.createElement('div');
+    box.className = 'import-box';
+    // Fall back to the palette-by-index color (same as the athlete list) so a
+    // newly added athlete shows its color immediately, not grey until a manual pick.
+    const dot = ath.color || PALETTE[athIdx % PALETTE.length];
+    box.innerHTML = `<div class="import-box-hdr">`
+      + `<span class="import-box-dot" style="background:${dot}"></span>`
+      + `<span class="import-box-name">${ath.name}</span>`
+      + `<span class="import-box-count">${owned.length} file${owned.length === 1 ? '' : 's'}</span>`
+      + `</div>`;
+    box.appendChild(buildImportZoneEl({ athleteId: ath.id }));
+    const filesEl = document.createElement('div');
+    filesEl.className = 'import-box-files';
+    owned.forEach(f => filesEl.appendChild(fileRow(f)));
+    box.appendChild(filesEl);
+    applyImportBusyState(box, { athleteId: ath.id });
+    wrap.appendChild(box);
+  }
+
+  // External videos box
+  const externals = videos.filter(f => isPlaybackOnlyVideo(f));
+  const extBox = document.createElement('div');
+  extBox.className = 'import-box external';
+  extBox.innerHTML = `<div class="import-box-hdr">`
+    + `<span class="import-box-dot" style="background:var(--muted)"></span>`
+    + `<span class="import-box-name">External videos</span>`
+    + `<span class="import-box-count">${externals.length} file${externals.length === 1 ? '' : 's'}</span>`
+    + `</div>`;
+  extBox.appendChild(buildImportZoneEl({ external: true }));
+  const extFilesEl = document.createElement('div');
+  extFilesEl.className = 'import-box-files';
+  externals.forEach(f => extFilesEl.appendChild(fileRow(f)));
+  extBox.appendChild(extFilesEl);
+  applyImportBusyState(extBox, { external: true });
+  wrap.appendChild(extBox);
+}
+
+async function handleFileUpload(files, handles = null, target = null) {
+  _uploadChain = _uploadChain.then(() => processFileUpload(files, handles, target));
   return _uploadChain.catch(err => {
     console.error('[Upload] queued upload failed:', err);
   });
 }
 
-async function processFileUpload(files, handles = null) {
-  const zone = el('drop-zone');
+async function stampImportedFileOwnership(result, target) {
+  // Assign ownership explicitly based on which box the files were dropped into.
+  // No cross-athlete GPS auto-mapping.
+  for (const f of (result.files || [])) {
+    try {
+      if (target?.external) {
+        if (f.kind === 'video') {
+          await setVideoExternalMode(f.id, { external: true });
+        }
+        // CSVs aren't accepted by the external box; ignore if any slipped through.
+      } else if (target?.athleteId) {
+        if (f.kind === 'video') {
+          await setVideoExternalMode(f.id, { external: false, athleteId: target.athleteId });
+        } else if (f.kind === 'csv') {
+          await setCsvAthleteAndLinkedVideos(f.id, target.athleteId);
+        }
+      }
+    } catch (e) {
+      console.warn('[Import] failed to assign ownership for', f.id, e);
+    }
+  }
+}
+
+// Identity key for duplicate detection: filename + byte size. Two imports of
+// the same file produce the same key, so re-importing is a no-op.
+function fileDedupeKey(name, size) {
+  return `${normalizeFilenameKey(name)}|${Number(size) || 0}`;
+}
+
+function getExistingImportedFileMap() {
+  const map = new Map();
+  const all = [...(state.mapData?.videos || []), ...(state.mapData?.csvs || [])];
+  for (const f of all) {
+    const name = f?.filename || f?.name;
+    if (name && f?.id) {
+      const key = fileDedupeKey(name, f?.size_bytes);
+      if (!map.has(key)) map.set(key, f);
+    }
+  }
+  return map;
+}
+
+async function processFileUpload(files, handles = null, target = null) {
   _activeUploadCount++;
   state.uploadInProgress = _activeUploadCount > 0;
+  setImportBusy(target, 'Importing files…');
+  renderImportBoxes();
   updateSetupUiState();
   try {
-    zone.innerHTML = '<div class="drop-zone-text" style="color:var(--accent)">Processing files...</div>';
+    // De-dupe imports by name + size. A picked file that matches an existing
+    // record is normally ignored — EXCEPT when that record's file is currently
+    // lost (path moved/deleted): then we re-link it to the freshly picked file
+    // (updating its durable disk path) instead of dropping it, so re-adding a
+    // lost file the next day repairs it rather than doing nothing.
+    const fileArr = Array.from(files || []);
+    const existingByKey = getExistingImportedFileMap();
+    const batchKeys = new Set();
+    const keepIdx = [];
+    let skipped = 0;
+    let relinked = 0;
+    for (let i = 0; i < fileArr.length; i++) {
+      const file = fileArr[i];
+      const key = fileDedupeKey(file?.name, file?.size);
+      if (batchKeys.has(key)) { skipped++; continue; }
+      const existing = existingByKey.get(key);
+      if (existing) {
+        const readable = await FM.isFileReadable(existing.id);
+        if (!readable) {
+          FM.relinkFile(existing.id, file, handles ? handles[i] : null);
+          relinked++;
+          batchKeys.add(key);
+          continue;
+        }
+        skipped++;
+        continue;
+      }
+      batchKeys.add(key);
+      keepIdx.push(i);
+    }
+    if (skipped > 0) console.log(`[Upload] ignored ${skipped} duplicate file(s)`);
+    if (relinked > 0) {
+      console.log(`[Upload] re-linked ${relinked} previously lost file(s)`);
+      await loadMapData();
+      buildTimeline();
+    }
+    const dedupedFiles = keepIdx.map(i => fileArr[i]);
+    const dedupedHandles = handles ? keepIdx.map(i => handles[i]) : null;
+    if (!dedupedFiles.length) {
+      setImportBusy(target, null);
+      renderImportBoxes();
+      return;
+    }
     // Register files with the file manager (keeps File references / handles)
-    const picked = FM.registerPickedFiles(files, handles);
+    const picked = FM.registerPickedFiles(dedupedFiles, dedupedHandles);
     console.log('[Upload] registered', picked.length, 'files:', picked.map(p => `${p.fileId} (${p.file.name})`));
-    // Run local ingest pipeline (GPS parsing + matching)
+    // Run local ingest pipeline (GPS parsing). Athlete-scoped matching runs
+    // after ownership is stamped below.
     const result = await Pipeline.ingestFiles(state.projectId, picked, (msg, pct) => {
       updateProgressRing(Math.round(pct * 100));
-      if(zone) zone.innerHTML = `<div class="drop-zone-text" style="color:var(--accent)">${msg}</div>`;
+      setImportBusy(target, msg || 'Processing…');
+      renderImportBoxes();
     });
     console.log('[Upload] ingest done, errors:', result.errors.length);
     if (result.errors.length) {
       console.warn('Ingest errors:', result.errors);
-      // Show brief toast for user visibility
       const errMsg = result.errors.map(e => '• ' + e).join('\n');
       setTimeout(() => alert('Some files had issues:\n' + errMsg), 100);
     }
-    const hasUploadedVideo = result.files.some(file => file.kind === 'video');
-    if (hasUploadedVideo && hasApiCsvConfig()) {
-      try {
-        await importApiCsvsForUploadedVideos(result.files, (msg, pct) => {
-          updateProgressRing(Math.round(pct * 100));
-          if(zone) zone.innerHTML = `<div class="drop-zone-text" style="color:var(--accent)">${msg}</div>`;
-        });
-      } catch (err) {
-        console.warn('[API CSV] automatic import failed:', err);
-      }
-    } else if (hasUploadedVideo) {
-      syncApiCsvInputs(null, '');
-    }
+    // Assign ownership from the import box (replaces auto-mapping).
+    setImportBusy(target, 'Assigning…');
+    renderImportBoxes();
+    await stampImportedFileOwnership(result, target);
+
     await loadMapData();
     const vids = state.mapData?.videos || [];
     console.log('[Upload] mapData loaded, videos:', vids.length, vids.map(v => `${v.id} ts=${v.ts_start}-${v.ts_end} dur=${v.duration_sec}`));
-    renderAthletes(); renderFilesList(); buildTimeline();
+    setImportBusy(target, null);
+    renderAthletes(); renderImportBoxes(); buildTimeline();
     void refreshManeuvers('files-ingested');
-    zone.innerHTML = `<span class="drop-zone-icon"><svg class="icon-svg" style="width:48px;height:48px"><use href="#ico-upload"/></svg></span><div class="drop-zone-text"><strong>Click to browse</strong> or drag & drop more files</div><div class="drop-zone-hint">Accepts .mp4, .mov, .csv files</div>`;
     updateProgressRing(100);
     setTimeout(() => updateProgressRing(0), 2000);
   } catch(err) {
     alert('Processing failed: ' + err.message);
-    zone.innerHTML = `<span class="drop-zone-icon"><svg class="icon-svg" style="width:48px;height:48px"><use href="#ico-upload"/></svg></span><div class="drop-zone-text"><strong>Click to browse</strong> or drag & drop files here</div><div class="drop-zone-hint">Accepts .mp4, .mov, .csv files</div>`;
     updateProgressRing(0);
   } finally {
+    setImportBusy(target, null);
+    // Update the busy flag before re-rendering so the all-windows blur clears
+    // once this was the last in-flight upload.
     _activeUploadCount = Math.max(0, _activeUploadCount - 1);
     state.uploadInProgress = _activeUploadCount > 0;
+    renderImportBoxes();
     updateSetupUiState();
   }
 }
@@ -12723,10 +13028,10 @@ function getSelectedModel() {
   return 'lite';
 }
 function areBoomPredictionsEnabled() {
-  return state.advancedFeatures?.boomPredictions !== false;
+  return state.advancedFeatures?.boomPredictions === true;
 }
 function areRudderPredictionsEnabled() {
-  return state.advancedFeatures?.rudderPredictions !== false;
+  return state.advancedFeatures?.rudderPredictions === true;
 }
 function getPoseProcessingOptions() {
   return {
@@ -14177,32 +14482,31 @@ function initDivider() {
 
   div.addEventListener('pointermove', e => {
     if(!dragging || e.pointerId !== activePointerId) return;
+    // Available width for the map column = everything except this divider and,
+    // when the external video is shown, its shell + its divider (those are sized
+    // independently by the phone divider — we never touch them here).
     const outerDividerW = div.offsetWidth || 0;
-    const maxW = Math.max(0, layout.offsetWidth - outerDividerW);
+    let reserved = outerDividerW;
+    if (layout.classList.contains('phone-playback-active')) {
+      reserved += (el('phone-playback-shell')?.offsetWidth || 0)
+        + (el('phone-playback-divider')?.offsetWidth || 0);
+    }
+    const maxW = Math.max(0, layout.offsetWidth - reserved);
     const rawW = Math.max(0, Math.min(startW + (e.clientX - startX), maxW));
+    // Allow dragging all the way to the edge to fully hide the map.
     const collapseMap = rawW <= ANALYSIS_COLUMN_COLLAPSE_PX;
-    const collapseVideo = rawW >= maxW - ANALYSIS_COLUMN_COLLAPSE_PX;
-    const w = collapseMap ? 0 : (collapseVideo ? maxW : rawW);
+    const w = collapseMap ? 0 : rawW;
 
-    const nextColumns = normalizeAnalysisColumns(state.analysisColumns);
-    nextColumns.mapMinimized = collapseMap;
-    nextColumns.videoMinimized = collapseVideo;
-    if (
-      nextColumns.mapMinimized !== state.analysisColumns.mapMinimized ||
-      nextColumns.videoMinimized !== state.analysisColumns.videoMinimized
-    ) {
+    if (collapseMap !== state.analysisColumns.mapMinimized) {
+      const nextColumns = normalizeAnalysisColumns(state.analysisColumns);
+      nextColumns.mapMinimized = collapseMap;
       state.analysisColumns = nextColumns;
       saveAnalysisColumnsSetting();
       applyAnalysisColumnsState();
     }
     left.style.width = w + 'px';
     left.style.flex = 'none';
-    if (layout.classList.contains('phone-playback-active')) {
-      state.phonePlayback.savedActiveLeftWidthPx = w;
-      // Hold the GoPro/phone shell at its saved width and let the external
-      // video grid flex to fill the rest of the new total width.
-      syncPhonePlaybackShellSize();
-    }
+    state.phonePlayback.savedActiveLeftWidthPx = w;
     if(state.map) state.map.invalidateSize();
     // Keep STL canvas sizing in sync while dragging divider.
     window.dispatchEvent(new Event('resize'));
@@ -14276,7 +14580,6 @@ function initPhonePlaybackDivider() {
     activePointerId = null;
     div.classList.remove('dragging');
     document.body.style.userSelect = '';
-    syncPhonePlaybackMapOffset();
     scheduleAnalysisMapResize();
   };
 
@@ -14291,11 +14594,16 @@ function initPhonePlaybackDivider() {
     div.classList.add('dragging');
     div.setPointerCapture(e.pointerId);
     document.body.style.userSelect = 'none';
+    // This bar resizes ONLY the external-video↔GoPro boundary. Stop the event so
+    // it can never reach the map↔video divider.
     e.preventDefault();
+    e.stopPropagation();
   });
 
   div.addEventListener('pointermove', e => {
     if (!dragging || e.pointerId !== activePointerId) return;
+    // Resize the external-video shell against the GoPro grid (panel-right) only.
+    // panel-left (map) is never touched here, so this bar cannot move the map.
     const totalW = Math.round((shell.getBoundingClientRect().width || 0) + (panelRight.getBoundingClientRect().width || 0));
     const rawW = Math.max(0, Math.min(startW + (e.clientX - startX), totalW));
     const collapsePhone = rawW <= ANALYSIS_COLUMN_COLLAPSE_PX;
@@ -14313,7 +14621,7 @@ function initPhonePlaybackDivider() {
     shell.style.flex = `0 0 ${nextW}px`;
     shell.style.padding = collapsePhone ? '0' : '';
     setPhonePlaybackGridWidth(totalW - nextW);
-    syncPhonePlaybackMapOffset();
+    e.stopPropagation();
     window.dispatchEvent(new Event('resize'));
   });
 
@@ -14489,8 +14797,8 @@ function normalizeAdvancedFeatures(raw = {}) {
     maneuversTab: !!raw?.maneuversTab,
     hull3d: !!raw?.hull3d,
     windPanel: !!raw?.windPanel,
-    boomPredictions: raw?.boomPredictions !== false,
-    rudderPredictions: raw?.rudderPredictions !== false,
+    boomPredictions: raw?.boomPredictions === true,
+    rudderPredictions: raw?.rudderPredictions === true,
   };
 }
 
@@ -15047,13 +15355,15 @@ function applyAdvancedModeVisibility() {
   const settingsWrap = el('ath-settings-wrap');
   if (settingsWrap) settingsWrap.classList.toggle('open', advanced);
 
-  const trackPanel = el('track-panel');
-  if (trackPanel) trackPanel.style.display = advanced ? '' : 'none';
+  // Segments / Tracks bars are governed by their own Settings toggles now
+  // (independent of advanced mode), so just re-apply that visibility here.
+  applyMapBarsVisibility();
 
   const stlBtn = el('btn-stl');
   if (stlBtn) stlBtn.style.display = advanced && state.advancedFeatures?.hull3d ? '' : 'none';
+  // Segment stats button is available regardless of advanced mode.
   const heatmapBtn = el('btn-heatmaps');
-  if (heatmapBtn) heatmapBtn.style.display = advanced ? '' : 'none';
+  if (heatmapBtn) heatmapBtn.style.display = '';
   const maneuverNav = document.querySelector('.nav-btn[data-view="view-maneuvers"]');
   if (maneuverNav) maneuverNav.style.display = state.advancedFeatures?.maneuversTab ? '' : 'none';
   if (!state.advancedFeatures?.maneuversTab && el('view-maneuvers')?.classList.contains('active-view')) {
@@ -15558,6 +15868,7 @@ async function init() {
   loadAdvancedFeaturesSetting();
   loadVideoLayoutSetting();
   loadVideoLayoutButtonVisibilitySetting();
+  loadMapBarsVisibilitySetting();
   loadAnalysisColumnsSetting();
   loadReportOptionsSetting();
   loadTimelineStatsWindowSetting();
@@ -15609,8 +15920,7 @@ async function init() {
   // Delete project
   el('btn-del-proj').onclick = ()=>deleteProject();
 
-  // Upload — drop zone and wizard
-  initDropZone();
+  // Upload — per-athlete import boxes are wired in renderImportBoxes()
   const apiCsvSaveBtn = el('btn-api-csv-save');
   if (apiCsvSaveBtn) apiCsvSaveBtn.onclick = () => saveApiCsvConfigFromInputs();
   el('api-csv-url')?.addEventListener('change', () => saveApiCsvConfigFromInputs());
@@ -15684,6 +15994,10 @@ async function init() {
   if (boomPredictionsFeatureToggle) boomPredictionsFeatureToggle.addEventListener('change', e => setAdvancedFeature('boomPredictions', e.target.checked));
   const rudderPredictionsFeatureToggle = el('feature-rudder-predictions-toggle');
   if (rudderPredictionsFeatureToggle) rudderPredictionsFeatureToggle.addEventListener('change', e => setAdvancedFeature('rudderPredictions', e.target.checked));
+  const showSegmentsBarToggle = el('show-segments-bar-toggle');
+  if (showSegmentsBarToggle) showSegmentsBarToggle.addEventListener('change', e => setShowSegmentsBar(e.target.checked));
+  const showTracksBarToggle = el('show-tracks-bar-toggle');
+  if (showTracksBarToggle) showTracksBarToggle.addEventListener('change', e => setShowTracksBar(e.target.checked));
   const videoLayoutBtn = el('btn-video-layout');
   if (videoLayoutBtn) videoLayoutBtn.addEventListener('click', e => {
     e.stopPropagation();
@@ -17196,7 +17510,16 @@ function createInlineHeatmapSummaryGrid(result, color) {
   grid.className = 'video-side-stats-grid';
   const visibleDefs = INLINE_HEATMAP_SUMMARY_DEFS.filter(def => isInlineHeatmapMenuItemVisible(`summary_${def.key}`));
   if (!visibleDefs.length) return null;
+  let shown = 0;
   for (const def of visibleDefs) {
+    // Skip metrics that aren't present or haven't finished calculating — a stat
+    // block with no samples (count 0) or a non-finite average (e.g. trunk angle
+    // when pose hasn't run) would otherwise render as a misleading "0.0".
+    const block = result?.[def.key];
+    const avg = Number(block?.avg);
+    const count = Number(block?.count);
+    if (!Number.isFinite(avg) || count === 0) continue;
+    shown++;
     const chip = document.createElement('div');
     chip.className = 'video-side-stat-chip';
     chip.style.borderColor = rgbaFromHex(color || '#5cc8ff', 0.16);
@@ -17213,6 +17536,7 @@ function createInlineHeatmapSummaryGrid(result, color) {
     chip.append(key, value);
     grid.appendChild(chip);
   }
+  if (!shown) return null;
   return grid;
 }
 
@@ -17691,13 +18015,13 @@ async function syncInlineHeatmapsToCurrentSegment(seg = getInlineHeatmapTargetSe
 
   if (!seg) {
     closeInlineHeatmapPlotOverlay();
+    // Outside any segment: clear the segment-stats columns rather than showing a
+    // "Heatmaps Preview" placeholder.
     for (const slot of state.tl?.athleteSlots || []) {
-      renderInlineHeatmapStateForSlot(
-        slot,
-        'Heatmaps Preview',
-        'Move the timeline playhead into a segment to show the report heatmaps beside each video.',
-        slot?.color || '#5cc8ff',
-      );
+      if (slot?._heatmapColEl) {
+        slot._heatmapColEl.dataset.inlineHeatmapActive = '';
+        slot._heatmapColEl.replaceChildren();
+      }
     }
     state.inlineHeatmaps.segmentId = null;
     state.inlineHeatmaps.results = null;

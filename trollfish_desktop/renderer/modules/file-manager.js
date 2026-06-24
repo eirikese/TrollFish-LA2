@@ -293,6 +293,41 @@ export function registerPickedFiles(files, handles = null) {
   return results;
 }
 
+/**
+ * Re-link an EXISTING file record to a freshly picked file (same name + size)
+ * whose on-disk location may have changed. Used when a previously imported file
+ * was lost (moved/deleted) and the user re-adds it — we update the durable path
+ * instead of creating a duplicate record.
+ * @param {string} fileId — the existing record id to re-link
+ * @param {File} file — freshly picked file (may carry _tfNativePath on desktop)
+ * @param {FileSystemFileHandle|null} handle
+ */
+export function relinkFile(fileId, file, handle = null) {
+  if (!fileId || !file) return;
+  forgottenFileIds.delete(fileId);
+  const nativePath = file._tfNativePath || null;
+  if (nativePath) {
+    handleCache.set(fileId, { handle: null, file, nativePath });
+    storeNativePath(fileId, nativePath).catch(() => {});
+  } else if (handle) {
+    handleCache.set(fileId, { handle, file });
+    storeHandle(fileId, handle).catch(() => {});
+  } else {
+    handleCache.set(fileId, { handle: null, file });
+    queuePersistToOPFS(fileId, file);
+  }
+}
+
+/** True when the file for this id can currently be read (path/handle/blob valid). */
+export async function isFileReadable(fileId) {
+  try {
+    const file = await getFileForReading(fileId);
+    return !!file;
+  } catch {
+    return false;
+  }
+}
+
 
 /**
  * Read a file as text (for CSV parsing).
